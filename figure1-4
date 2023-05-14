@@ -1,0 +1,4067 @@
+---
+title: "氧气条件对四环素污染土壤物种组成和抗性基因扩散影响"
+author: "huicong yan"
+date: "2023-01-29"
+output: html_document
+---
+# 研究目的
+文章主要目的为探究土壤再四环素污染下，氧气条件不同对抗性基因扩散的影响。 主要分析思路为首先看在不同氧气条件下四环素污染下土壤的微生物组成的差异。 其次比较不同组别中的微生物共现网络的差异，并用网络属性找到核心物种**keystone**，然后关注核心物种的演化情况。  第三章用群落构建中的随机性和确定性过程来解释说明波动环境下减少了物种的选择压力。
+
+# 配置运行环境导入原始数据
+rmarkdown保存在工作文件目录中，这样不需要额外设置工作目录
+#数据说明
+文多样性数据都用phyloseq进行操作，其中physeq.ae/an/flu为网络分析以后保存的物种，physeq为原始OTU，如果需要保留方式可以参考figure2 a-c的操作方式
+## 工作包加载
+```{r library}
+rm(list = ls())
+library(phyloseq)
+library(igraph)
+library(network)
+library(sna)
+library(tidyverse)
+library(devtools)
+library(ggClusterNet)
+library(devtools)
+library(SpiecEasi)
+library(Biostrings)
+library(ggnewscale)
+library(ape)
+library(psych)
+library(reshape2)
+library(gridExtra)
+library(grid)
+library(vegan)
+library(Matrix)
+library(amplicon)
+library(ggplot2)
+library(ggsignif)
+library(picante)
+load("physeq.RData")
+getwd()
+```
+
+## 从头加载数据创建phyloseq文件
+如有需要可以从头导入生成phloseq文件，[phyloseq](https://joey711.github.io/phyloseq/)操作参考.
+```{r importphyseq}
+otu<-read.table("data/ASV_table.csv",header = T,row.names = 1,sep ="," )
+tree<-read.tree("data/ASV_phylo.tre")
+tax<-read.csv("data/taxonomy_origin.csv",row.names=1,header=T, sep=",")
+environment<-read.csv("data/metadata.csv",header = T,row.names = 1,sep = ",")
+design <- read.table("data/design_16s.csv", header=T, row.names=1, sep=",",na.strings="NA")
+design$Treatment <- factor(design $Treatment,
+                           levels=c("Control","Anaerobic","Aerobic","Fluctuation"))
+design$Exposue.Time <- 
+  factor(design $Exposue.Time ,levels=c("Initial","Six",
+                                        "Twelve","Eighteen","Twenty Four","Thirty"))
+design$treatstage <- 
+  factor(design$treatstage, levels = 
+           c("ControlInitial","AnaerobicSix","AnaerobicTwelve","AnaerobicEighteen",
+             "AnaerobicTwenty Four","AnaerobicThirty","FluctuationSix","FluctuationTwelve",
+             "FluctuationEighteen","FluctuationTwenty Four","FluctuationThirty","AerobicSix",
+             "AerobicTwelve","AerobicEighteen","AerobicTwenty Four","AerobicThirty"))
+design$ID<-rownames(design)
+design$ID<-as.factor(design$ID)
+#install.packages("janitor")
+#library("janitor")
+#environment1<-remove_empty(environment,which="rows")
+#需要将注释文件转为矩阵
+tax<-as.matrix(tax)
+metadata1 <- merge(environment,design,by="row.names")
+rownames(metadata1) <- metadata1$Row.names
+metadata2 <- metadata1[,-1]
+OTU = otu_table(otu, taxa_are_rows = TRUE)
+TAX = tax_table(tax)
+sampledata = sample_data(metadata2)
+physeq=phyloseq(OTU, TAX,sampledata,tree)
+save(physeq, file = "physeq.RData")
+```
+
+##直接导入之前images中保存的phyloseq文件
+```{r loadphyseq}
+'%!in%' <- function(x,y) {
+  !('%in%'(x,y))
+} 
+load("physeq.RData")
+```
+
+## 基本函数
+### 均一化函数
+```{r}
+normalize_data <- function(data){
+  # 计算每列的平均值和标准差
+  column_means <- colMeans(data)
+  column_sds <- apply(data, 2, sd)
+  
+  # 对每一列进行均一化
+  normalized_data <- data
+  for (i in 1:ncol(data)) {
+    normalized_data[,i] <- (data[,i] - column_means[i]) / column_sds[i]
+  }
+  
+  return(normalized_data)
+}
+```
+##绘图的主题参数
+```{r}
+my_theme <- theme(plot.title=element_text(hjust=0.5,size=16,face="bold", family="serif"),
+      axis.text=element_text(size=8,face="bold", family="serif",colour = "black"),
+      axis.title.x=element_text(size=14, family="serif",face = "bold"),
+      axis.title.y=element_text(size=14, family="serif",face = "bold"),
+      panel.background = element_rect(fill = "transparent"), # bg of the panel
+      plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+      panel.grid.major = element_blank(), # get rid of major grid
+      panel.grid.minor = element_blank(), # get rid of minor grid
+      legend.position = "bottom",
+      panel.border = element_rect(size = 0.5, fill = NA, color = "black"),axis.ticks = element_line(size = 0.5),
+      axis.ticks.length.x = unit(-0.12, "cm"),
+      strip.text = element_text(face = "bold.italic", size = 12, family = "serif",margin = margin(0, 0, 4, 4)),
+      legend.title = element_text(size=14, family="serif",face = "bold"),
+      legend.text = element_text(size=12, family="serif",face = "bold")) 
+```
+
+
+# 分析过程
+## 快速判断数据是否符合正态分布
+```{r}
+p <- ggplot(data = an, mapping = aes(
+  sample = Environment ))
+p + geom_qq() + 
+  geom_qq_line()
+
+```
+## 抗性基因丰度差异分析
+```{r}
+####抗性基因的差异检验####
+#提取出抗性基因丰度信息
+load("physeq.RData")
+mata_data <- sample_data(physeq) %>% data.frame()
+arg_re <- mata_data[,c(3,4,5,6,7,11,12)]
+#构建多元线性回归模型 model确定分组是否对这些参数产生了影响
+model <- lm(cbind(tetl,tetx,teta,tetw,inti) ~ Treatment,arg_re)
+model
+Manova(model,test.statistic="Pillai")
+#p<0.001分组对抗性基因存在显著差异
+#事后检验
+#为了检测每个变量对显著性结果的贡献，MANOVA分析完成后，接着进行单变量单因素方差分析
+#转化为长表用于绘图
+arg_re1 <- melt(arg_re,id=c("Treatment", "Exposue.Time"))
+arg_re1
+colnames(arg_re1) <- c("Treatment","Exposue.Time","ARG_Type","Abundance")
+#利用gather实现长表转换
+data <- arg_re %>% 
+  gather(key = "variables",value = "value",names(arg_re[1:5])) %>%
+  group_by(variables) # 此处变量名一定要命名为variables，否则后续添加显著性标签位置时，会报错。
+data
+data %>% kruskal_test(value ~ Treatment) %>%
+  adjust_pvalue(method = "bonferroni")
+#所有的抗性基因在分组间都存在差异
+#inti 0.00000625,teta 0.00087,tetl 0.00000122,tetw 0.00000000063,tetx 0.000000185
+#其他差异检验的方法
+#anova_test()用于对满足正态分布和方差齐性假设的变量进行方差分析。
+#变量不满足方差齐性检测则使用welch_anova_test()。
+#非参数kruskal_test()用于对不满足正态分布或方差齐性假设的变量进行方差分析
+#两两比较
+res <- data %>% 
+  games_howell_test(value ~ Treatment) %>%
+  select(-estimate,-conf.low,-conf.high) #移除一些细节
+res
+write.csv(res,file = "result/figure1/res.csv")
+#当数据满足方差齐性假设时，rstatix包的tukey_hsd()用于计算Tukey post-hoc检验。
+#数据不满足方差齐性假设时，则使用games_howell_test()进行Games-Howell post-hoc检验。 
+#pairwise_t_test(pool.sd=FALSE, var.equal=FALSE)也可用于对不满足方差齐性假设的数据进行两两比较。
+#挑取第30天数据
+arg30 <- filter(arg_re,Exposue.Time=="Thirty")
+data1 <- arg30 %>% 
+  gather(key = "variables",value = "value",names(arg_re[1:5])) %>%
+  group_by(variables) # 此处变量名一定要命名为variables，否则后续添加显著性标签位置时，会报错。
+data1
+res1 <- data1 %>% 
+  games_howell_test(value ~ Treatment) %>%
+  select(-estimate,-conf.low,-conf.high) #移除一些细节
+res1
+write.csv(res1,file = "result/figure1/res30.csv")
+
+```
+### 抗性基因差异统计
+```{r}
+#抗性基因丰度统计
+res_sum <- arg_re%>%
+  filter(Exposue.Time == "Thirty") %>%
+  group_by(Treatment) %>%
+  summarize(tetl_mean = mean(tetl),
+            tetx_mean = mean(tetx),
+            teta_mean = mean(teta),
+            tetw_mean = mean(tetw),
+            inti_mean = mean(inti),
+            tetl_sd = sd(tetl),
+            tetx_sd = sd(tetx),
+            teta_sd = sd(teta),
+            tetw_sd = sd(tetw),
+            inti_sd = sd(inti))
+res_sum
+res_sd <- arg_re%>%
+  filter(Exposue.Time == "Thirty") %>%
+  group_by(Treatment) %>%
+  summarize(tetl_sd = sd(tetl),
+            tetx_sd = sd(tetx),
+            teta_sd = sd(teta),
+            tetw_sd = sd(tetw),
+            inti_sd = sd(inti))
+res_sd
+initial_sum <- arg_re%>%
+  filter(Exposue.Time == "Initial") %>%
+  group_by(Treatment) %>%
+  summarize(tetl_mean = mean(tetl),
+            tetx_mean = mean(tetx),
+            teta_mean = mean(teta),
+            tetw_mean = mean(tetw),
+            inti_mean = mean(inti),
+            tetl_sd = sd(tetl),
+            tetx_sd = sd(tetx),
+            teta_sd = sd(teta),
+            tetw_sd = sd(tetw),
+            inti_sd = sd(inti))
+initial_sum
+
+#计算相对倍数
+df_long <- pivot_longer(arg_mean, cols = -Treatment, names_to = "Sample", values_to = "Mean")
+df_long
+df_long <- df_long %>%
+  mutate(Ratio = ifelse(Treatment == "Control", 1, Mean / df_long$Mean[df_long$Treatment == "Control"]))
+df_long
+
+```
+### figure1a
+```{r}
+arg_re <- mata_data[,c(3,4,5,6,7,9,11,12)]
+arg_re1 <- melt(arg_re,id=c("Treatment", "Exposue.Time"))
+arg_re1
+colnames(arg_re1) <- c("Treatment","Exposue.Time","ARG_Type","Abundance")
+p <- ggplot(arg_re1,aes(x=Exposue.Time,y=Abundance))+
+  labs(y="ARGs copies/16S rRNA copies",x="Stage of succession")+
+  theme_test()+facet_wrap(~ARG_Type,ncol=2,scales = "free_y",
+                          labeller = labeller(
+                            ARG_Type = c(tetl = "Tetracycline Efflux (tetL)",
+                                         teta = "Tetracycline Efflux (tetA)",
+                                         tetx = "tetracycline transformation (tetX)",
+                                         tetw ="Ribosomal Protection Protein (tetW)",
+                                         inti ="Mobile Genetic elements(intI)",
+                                         antibiotics ="Tetracycline")))+
+  ylab(ifelse(arg_re1$ARG_Type == "antibiotics", "Relative Tetracycline Concentration", "ARGs copies/16S rRNA copies"))+
+  geom_boxplot(size=1,aes(colour= Treatment),outlier.color = "NA", outlier.shape = NA,fill = "transparent")+
+  geom_jitter(alpha=0.8, size=3, aes(x=Exposue.Time,colour = Treatment),position = position_jitterdodge(dodge.width = 0.75))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))
+p1 <- p+my_theme
+p1+theme(strip.text = element_text(face = "bold.italic", size = 12, family = "serif",margin = margin(0, 0, 4, 4)))
+ggsave("result/figure1/figure1.pdf",width=18.09,height=13.45,units = "cm",bg="transparent")
+ggsave("result/figure1/figure1.tiff",width=18.09,height=13.45,units = "cm",bg="transparent")
+
+```
+
+### figure2a-c
+```{r}
+####获得otu水平的chao1指数####
+#Chao1指数则是对物种数的一个更全面的估计。
+#Chao1指数通过分析样本中单个物种的单次出现和两次以上出现的物种数的比率，估计未被观察到的物种数量。
+#Chao1指数的计算还考虑了样本中单个物种的数量和出现次数，因此可以更全面地估计物种的丰富度
+#计算OTU水平的超chao1指数
+#提取好氧组数据，并进行抽平和去噪音处理
+a.ae.phy <- subset_samples(physeq,Treatment %in%c("Control","Aerobic"))
+a.ae.phy<- rarefy_even_depth(a.ae.phy,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(a.ae.phy, test_function, A = 2)#至少在三个样本中大于2
+a.ae.phy<-prune_taxa(taxa.to.keep, a.ae.phy)#按筛选条件进行过滤 留下2539个otu
+
+#厌氧
+a.an.phy <- subset_samples(physeq,Treatment %in%c("Control","Anaerobic"))
+a.an.phy<- rarefy_even_depth(a.an.phy,rngseed = 800)#按最小样本量进行抽平
+taxa.to.keep <- genefilter_sample(a.an.phy, test_function, A = 2)#至少在三个样本中大于2
+a.an.phy<-prune_taxa(taxa.to.keep, a.an.phy)#按筛选条件进行过滤 留下2589个otu
+
+#波动组
+a.flu.phy <- subset_samples(physeq,Treatment %in%c("Control","Fluctuation"))
+a.flu.phy<- rarefy_even_depth(a.flu.phy,rngseed = 800)#按最小样本量进行抽平
+taxa.to.keep <- genefilter_sample(a.flu.phy, test_function, A = 2)#至少在三个样本中大于2
+a.flu.phy<-prune_taxa(taxa.to.keep, a.flu.phy)#按筛选条件进行过滤 留下2596个otu
+
+alpha_flu_Chao1 <- estimate_richness(a.flu.phy, measures = c("Chao1"))
+alpha_ae_Chao1  <- estimate_richness(a.ae.phy, measures = c("Chao1"))
+alpha_an_Chao1  <- estimate_richness(a.an.phy, measures = c("Chao1"))
+
+
+####获得样本的Shannon和Simpson指数####
+#kingdom, phylum, class, order, family, genus, species
+a.ae.phy.order <-tax_glom(a.ae.phy, taxrank="Order")
+a.an.phy.order <-tax_glom(a.an.phy, taxrank="Order")
+a.flu.phy.order <-tax_glom(a.flu.phy, taxrank="Family")
+alpha_flu <- estimate_richness(a.flu.phy.order, measures = c("Shannon","Simpson"))
+alpha_ae <- estimate_richness(a.ae.phy.order, measures = c("Shannon","Simpson"))
+alpha_an <- estimate_richness(a.an.phy.order, measures = c("Shannon","Simpson"))
+
+####合并chao1和shannon,simpson指数####
+alpha_flu1 <- cbind(alpha_flu,alpha_flu_Chao1)
+alpha_an1 <- cbind(alpha_an,alpha_an_Chao1)
+alpha_ae1 <- cbind(alpha_ae,alpha_ae_Chao1)
+
+####加上时间和处理信息####
+env <- sample_data(physeq)
+alpha_ae1$ID <- rownames(alpha_ae1)
+alpha_ae2 <- alpha_ae1[,c(1,2,3,5)] %>% left_join(env[,c(11,12,14)], by = "ID")
+alpha_ae2$Treatment='Aerobic'
+alpha_an1$ID <- rownames(alpha_an1)
+alpha_an2 <- alpha_an1[,c(1,2,3,5)] %>% left_join(env[,c(11,12,14)], by = "ID")
+alpha_an2$Treatment='Anaerobic'
+alpha_flu1$ID <- rownames(alpha_flu1)
+alpha_flu2 <- alpha_flu1[,c(1,2,3,5)] %>% left_join(env[,c(11,12,14)], by = "ID")
+alpha_flu2$Treatment='Fluctuation'
+alpha <- rbind(alpha_ae2,alpha_an2,alpha_flu2)
+write.csv(alpha,"result/figure2/alpha.csv")
+alpha1 <- read.csv("result/figure2/alpha.csv")
+alpha1 <- alpha1[,c(-1,-5)]
+alpha1$Exposue.Time <- 
+  factor(alpha1$Exposue.Time ,levels=c("Initial","Six",
+                                        "Twelve","Eighteen","Twenty Four","Thirty"))
+alpha1 <- melt(alpha1 ,id=c("Treatment", "Exposue.Time"))
+####进行差异比较####
+#结果进行差异比较
+# 定义一个函数，用于进行aov和TukeyHSD分析
+analyze <- function(df) {
+  model <- aov(value ~ Treatment, data = df)
+  tukey <- TukeyHSD(model, "Treatment")
+  return(tukey)
+}
+#获得chao1
+Chao1 <- filter(alpha1,variable=="Chao1")
+Chao1 <- Chao1 %>% rename("variable"="Chao1")
+# 将数据框按照exposure time进行拆分
+Chao1_list <- split(Chao1, Chao1$Exposue.Time)
+# 对Chao1_list中的每个数据框进行分析，并将结果存储到一个列表中
+result_list_Chao1 <- lapply(Chao1_list, analyze)
+# 将结果列表合并为一个数据框
+result_df_Chao1 <- do.call(rbind, lapply(result_list, function(x) x$Treatment)) %>% data.frame()
+
+#Shannon指数
+Shannon <- filter(alpha1,variable=="Shannon")
+Shannon <- Shannon %>% rename("variable"="Shannon")
+# 将数据框按照exposure time进行拆分
+Shannon_list <- split(Shannon, Shannon$Exposue.Time)
+# 对Shannon_list中的每个数据框进行分析，并将结果存储到一个列表中
+result_list_Shannon <- lapply(Shannon_list, analyze)
+# 将结果列表合并为一个数据框
+result_df_Shannon <- do.call(rbind, lapply(result_list_Shannon, function(x) x$Treatment)) %>% data.frame()
+
+#Simpson指数组间差异检验
+Simpson <- filter(alpha1,variable=="Simpson")
+Simpson <- Simpson %>% rename("variable"="Simpson")
+# 将数据框按照exposure time进行拆分
+Simpson_list <- split(Simpson, Simpson$Exposue.Time)
+
+# 对Simpson_list中的每个数据框进行分析，并将结果存储到一个列表中
+result_list_Simpson <- lapply(Simpson_list, analyze)
+
+# 将结果列表合并为一个数据框
+result_df_Simpson <- do.call(rbind, lapply(result_list_Simpson, function(x) x$Treatment)) %>% data.frame()
+#查看结果
+result_df_Simpson
+result_df_Shannon
+result_df_Chao1
+write.csv(result_df_Simpson,"result/figure2/result_df_Simpson.csv")
+write.csv(result_df_Shannon,"result/figure2/result_df_Shannon.csv")
+write.csv(result_df_Chao1,"result/figure2/result_df_Chao1.csv")
+####绘图####
+p <- ggplot(alpha1,aes(x=Exposue.Time,y=value))+
+  labs(y="Alpha Diversity",x="Stage of succession")+
+  theme_test()+facet_wrap(~variable,ncol=1,scales = "free_y")+
+  geom_boxplot(size=1,aes(colour= Treatment),outlier.color = "NA", outlier.shape = NA,fill = "transparent")+
+  geom_jitter(alpha=0.8, size=3, aes(x=Exposue.Time,colour = Treatment),position = position_jitterdodge(dodge.width = 0.75))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))
+p
+p1 <- p+my_theme+theme(legend.position = "none")
+p1
+ggsave("result/figure1/figure2.pdf",width=10,height=13.45,units = "cm",bg="transparent")
+ggsave("result/figure1/figure2.tiff",width=10,height=13.45,units = "cm",bg="transparent")
+
+```
+###figureS1
+```{r}
+####计算样本之间差异####
+#计算好氧组样本间差异
+ae_otu <- otu_table(a.ae.phy,'matrix') %>% 
+  t() %>% data.frame()
+# 读入 OTU 表格，假设存储为 otu_table
+# 对 OTU 表格进行转置，将样本作为行，OTU 作为列
+# 计算 Bray-Curtis dissimilarity
+bc_ae <-vegdist(ae_otu, method = "bray") %>%
+  as.matrix() %>% as.data.frame()
+
+# 计算 Jaccard similarity
+jaccard_ae <- vegdist(ae_otu, method = "jaccard")
+
+
+#计算厌氧组样本间差异
+an_otu <- otu_table(a.an.phy,'matrix') %>% 
+  t() %>% data.frame()
+# 读入 OTU 表格，假设存储为 otu_table
+# 对 OTU 表格进行转置，将样本作为行，OTU 作为列
+# 计算 Bray-Curtis dissimilarity
+bc_an <-vegdist(an_otu, method = "bray") %>%
+  as.matrix() %>% as.data.frame()
+
+# 计算 Jaccard similarity
+jaccard_an <- vegdist(an_otu, method = "jaccard")
+
+
+#计算波动组之间差异
+flu_otu <- otu_table(a.flu.phy_family,'matrix') %>% 
+  t() %>% data.frame()
+# 读入 OTU 表格，假设存储为 otu_table
+# 对 OTU 表格进行转置，将样本作为行，OTU 作为列
+# 计算 Bray-Curtis dissimilarity
+bc_flu <-vegdist(flu_otu, method = "bray") %>%
+  as.matrix() %>% as.data.frame()
+
+# 计算 Jaccard similarity
+jaccard_flu <- vegdist(flu_otu, method = "jaccard")
+####好氧组时间间隔####
+ae0 <- character(5)
+ae6 <- character(5)  # 为5行的空向量
+ae12 <- character(5)
+ae18 <- character(5)
+ae24 <- character(5)
+ae30 <- character(5)
+for (i in 0:5) {
+  ae0[i] <- paste("D0_",i,sep="")
+  ae6[i] <- paste("O_D6_", i, sep = "")
+  ae12[i] <- paste("O_D12_", i, sep = "")
+  ae18[i] <- paste("O_D18_", i, sep = "")
+  ae24[i] <- paste("O_D24_", i, sep = "")
+  ae30[i] <- paste("O_D30_", i, sep = "")
+}
+ae6_bc<- bc_ae[row.names(bc_ae) %in% ae0, colnames(bc_ae) %in% ae6]
+ae12_bc<- bc_ae[row.names(bc_ae) %in% ae6, colnames(bc_ae) %in% ae12] 
+ae18_bc<- bc_ae[row.names(bc_ae) %in% ae12, colnames(bc_ae) %in% ae18] 
+ae24_bc<- bc_ae[row.names(bc_ae) %in% ae18, colnames(bc_ae) %in% ae24] 
+ae30_bc<- bc_ae[row.names(bc_ae) %in% ae24, colnames(bc_ae) %in% ae30]
+ae6_bc<- pivot_longer(ae6_bc, everything(), names_to = "sample", values_to = "value")
+ae12_bc<- pivot_longer(ae12_bc, everything(), names_to = "sample", values_to = "value")
+ae18_bc<- pivot_longer(ae18_bc, everything(), names_to = "sample", values_to = "value")
+ae24_bc<- pivot_longer(ae24_bc, everything(), names_to = "sample", values_to = "value")
+ae30_bc<- pivot_longer(ae30_bc, everything(), names_to = "sample", values_to = "value")
+ae6_bc$Time="Six"
+ae12_bc$Time="Twelve"
+ae18_bc$Time="Eighteen"
+ae24_bc$Time="Twenty Four"
+ae30_bc$Time="Thirty"
+ae_bc <- rbind(ae6_bc,ae12_bc,ae18_bc,ae24_bc,ae30_bc)
+ae_bc$Treatment="Aerobic"
+
+####厌氧组时间间隔####
+an0 <- character(5)
+an6 <- character(5)  # 为5行的空向量
+an12 <- character(5)
+an18 <- character(5)
+an24 <- character(5)
+an30 <- character(5)
+for (i in 0:5) {
+  an0[i] <- paste("D0_",i,sep="")
+  an6[i] <- paste("N_D6_", i, sep = "")
+  an12[i] <- paste("N_D12_", i, sep = "")
+  an18[i] <- paste("N_D18_", i, sep = "")
+  an24[i] <- paste("N_D24_", i, sep = "")
+  an30[i] <- paste("N_D30_", i, sep = "")
+}
+an6_bc<- bc_an[row.names(bc_an) %in% an0, colnames(bc_an) %in% an6]
+an12_bc<- bc_an[row.names(bc_an) %in% an6, colnames(bc_an) %in% an12] 
+an18_bc<- bc_an[row.names(bc_an) %in% an12, colnames(bc_an) %in% an18] 
+an24_bc<- bc_an[row.names(bc_an) %in% an18, colnames(bc_an) %in% an24] 
+an30_bc<- bc_an[row.names(bc_an) %in% an24, colnames(bc_an) %in% an30]
+an6_bc<- pivot_longer(an6_bc, everything(), names_to = "sample", values_to = "value")
+an12_bc<- pivot_longer(an12_bc, everything(), names_to = "sample", values_to = "value")
+an18_bc<- pivot_longer(an18_bc, everything(), names_to = "sample", values_to = "value")
+an24_bc<- pivot_longer(an24_bc, everything(), names_to = "sample", values_to = "value")
+an30_bc<- pivot_longer(an30_bc, everything(), names_to = "sample", values_to = "value")
+an6_bc$Time="Six"
+an12_bc$Time="Twelve"
+an18_bc$Time="Eighteen"
+an24_bc$Time="Twenty Four"
+an30_bc$Time="Thirty"
+an_bc <- rbind(an6_bc,an12_bc,an18_bc,an24_bc,an30_bc)
+an_bc$Treatment="Anaerobic"
+####波动组时间间隔####
+flu0 <- character(5)
+flu6 <- character(5)  # 为5行的空向量
+flu12 <- character(5)
+flu18 <- character(5)
+flu24 <- character(5)
+flu30 <- character(5)
+for (i in 0:5) {
+  flu0[i] <- paste("D0_",i,sep="")
+  flu6[i] <- paste("NO_D6_", i, sep = "")
+  flu12[i] <- paste("NO_D12_", i, sep = "")
+  flu18[i] <- paste("NO_D18_", i, sep = "")
+  flu24[i] <- paste("NO_D24_", i, sep = "")
+  flu30[i] <- paste("NO_D30_", i, sep = "")
+}
+flu6_bc<- bc_flu[row.names(bc_flu) %in% flu0, colnames(bc_flu) %in% flu6]
+flu12_bc<- bc_flu[row.names(bc_flu) %in% flu6, colnames(bc_flu) %in% flu12] 
+flu18_bc<- bc_flu[row.names(bc_flu) %in% flu12, colnames(bc_flu) %in% flu18] 
+flu24_bc<- bc_flu[row.names(bc_flu) %in% flu18, colnames(bc_flu) %in% flu24] 
+flu30_bc<- bc_flu[row.names(bc_flu) %in% flu24, colnames(bc_flu) %in% flu30]
+flu6_bc<- pivot_longer(flu6_bc, everything(), names_to = "sample", values_to = "value")
+flu12_bc<- pivot_longer(flu12_bc, everything(), names_to = "sample", values_to = "value")
+flu18_bc<- pivot_longer(flu18_bc, everything(), names_to = "sample", values_to = "value")
+flu24_bc<- pivot_longer(flu24_bc, everything(), names_to = "sample", values_to = "value")
+flu30_bc<- pivot_longer(flu30_bc, everything(), names_to = "sample", values_to = "value")
+flu6_bc$Time="Six"
+flu12_bc$Time="Twelve"
+flu18_bc$Time="Eighteen"
+flu24_bc$Time="Twenty Four"
+flu30_bc$Time="Thirty"
+flu_bc <- rbind(flu6_bc,flu12_bc,flu18_bc,flu24_bc,flu30_bc)
+flu_bc$Treatment="Fluctuation"
+
+
+####合并间隔进行绘图####
+bc_all <- rbind(flu_bc,an_bc,ae_bc)
+bc_all
+bc_all$Time <-factor(bc_all$Time,levels=c("Six","Twelve","Eighteen","Twenty Four","Thirty"))
+
+
+```
+####plot figureS1
+```{r}
+p <- ggplot(bc_all,aes(x=Time,y=value))+
+  labs(y="Bray-Curtis Distance",x="Time Interval")+
+  theme_test()+
+  geom_boxplot(size=1,aes(colour= Treatment),outlier.color = "NA", outlier.shape = NA,fill = "transparent")+
+  geom_jitter(alpha=0.8, size=3, aes(x=Time,colour = Treatment),position = position_jitterdodge(dodge.width = 0.75))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))
+p
+p1 <- p+my_theme
+p1
+ggsave("result/figure1/figure2d.pdf",width=10,height=6.725,units = "cm",bg="transparent")
+ggsave("result/figure1/figure2d.tiff",width=10,height=6.725,units = "cm",bg="transparent")
+```
+###figure 2d
+```{r}
+#准备数据
+
+#好氧组样本间nmds距离
+ae_otu1 <- otu_table(a.ae.phy_family,"matrix") %>% t() %>% data.frame()
+#ae_otu1<- decostand(ae_otu, method = "total")#均一化处理
+#ae.distance.jsd <- vegdist(ae_otu1, method = "jaccard", binary = TRUE,trymax=500, distance = "euclidean")
+ae_otu2<- decostand(ae_otu1, method = "total")
+nmds_ae <- metaMDS(ae_otu2,trymax=500, distance = "bray")#stress=0.0905162
+species_ae <- envfit(nmds_ae,ae_otu1)
+speci.core.ae <- species_ae[["vectors"]]
+speci.core.ae.df<- cbind(speci.core.ae[["arrows"]],speci.core.ae[["pvals"]],speci.core.ae[["r"]]) %>% data.frame()
+colnames(speci.core.ae.df) <- c("NMDS1","NMDS2","p","r")
+speci.im.ae <- subset(speci.core.ae.df,p<0.01)
+core.ae <- speci.im.ae[order(speci.im.ae$r, decreasing = TRUE), ][1:5,]                                                                    
+#提取ndms坐标信息
+ae.point <- nmds_ae$point %>% data.frame()
+#为ae.point加上时间分组信息
+ae.group <- sample_data(a.ae.phy) %>% data.frame()
+ae.group <- ae.group$Exposue.Time 
+ae.point$group <- factor(ae.group,levels=c("Initial","Six",
+                                           "Twelve","Eighteen","Twenty Four","Thirty"))
+#厌氧组
+an_otu1 <- otu_table(a.an.phy_family,"matrix") %>% t() %>% data.frame()
+#an_otu1<- decostand(an_otu, method = "total")#均一化处理
+#an.distance.jsd <- vegdist(an_otu1, method = "jaccard", binary = TRUE,trymax=500, distance = "euclidean")
+an_otu2<- decostand(an_otu1, method = "total")
+nmds_an <- metaMDS(an_otu2,trymax=500, distance = "bray")#stress=0.09897555 
+species_an <- envfit(nmds_an,an_otu1)
+speci.core.an <- species_an[["vectors"]]
+speci.core.an.df<- cbind(speci.core.an[["arrows"]],speci.core.an[["pvals"]],speci.core.an[["r"]]) %>% data.frame()
+colnames(speci.core.an.df) <- c("NMDS1","NMDS2","p","r")
+speci.im.an <- subset(speci.core.an.df,p<0.01)
+core.an <- speci.im.an[order(speci.im.an$r, decreasing = TRUE), ][1:5,]                                                                    
+#提取ndms坐标信息
+an.point <- nmds_an$point %>% data.frame()
+#为an.point加上时间分组信息
+an.group <- sample_data(a.an.phy) %>% data.frame()
+an.group <- an.group$Exposue.Time 
+an.point$group <- factor(an.group,levels=c("Initial","Six",
+                                           "Twelve","Eighteen","Twenty Four","Thirty"))
+#波动组组样本间nmds距离
+flu_otu1 <- otu_table(a.flu.phy.order,"matrix") %>% t() %>% data.frame()
+#flu_otu1<- decostand(flu_otu, method = "total")#均一化处理
+#flu.distance.jsd <- vegdist(flu_otu1, method = "jaccard", binary = TRUE,trymax=500, distance = "euclidean")
+nmds_flu <- metaMDS(flu_otu1,trymax=500, distance = "bray")#stress=0.1399113
+species_flu <- envfit(nmds_flu,flu_otu1)
+speci.core.flu <- species_flu[["vectors"]]
+speci.core.flu.df<- cbind(speci.core.flu[["arrows"]],speci.core.flu[["pvals"]],speci.core.flu[["r"]]) %>% data.frame()
+colnames(speci.core.flu.df) <- c("NMDS1","NMDS2","p","r")
+speci.im.flu <- subset(speci.core.flu.df,p<0.01)
+core.flu <- speci.im.flu[order(speci.im.flu$r, decreasing = TRUE), ][1:5,]                                                                    
+#提取ndms坐标信息
+flu.point <- nmds_flu$point %>% data.frame()
+#为flu.point加上时间分组信息
+flu.group <- sample_data(a.flu.phy) %>% data.frame()
+flu.group <- flu.group$Exposue.Time 
+flu.point$group <- factor(flu.group,levels=c("Initial","Six",
+                                           "Twelve","Eighteen","Twenty Four","Thirty"))
+
+```
+####plot figure2d
+```{r}
+#NMDS绘图
+#为nnmds点加入分组信息
+ae.point$Treatment="Aerobic"
+an.point$Treatment="Anaerobic"
+flu.point$Treatment="Fluctuation"
+#为主要驱动物种加上分组信息
+core.ae$Treatment="Aerobic"
+core.an$Treatment="Anaerobic"
+core.flu$Treatment="Fluctuation"
+#合并nmds绘图坐标
+nmds <- rbind(ae.point,an.point,flu.point)
+core <- rbind(core.ae,core.an,core.flu)
+figure2e <- ggplot()+ geom_segment(data = core, aes(xend = 0.1*NMDS1, yend = 0.1*NMDS2, x = 0, y = 0,colour=Treatment),
+                                   arrow = arrow(type="open"),size=1,alpha=0.6)
+figure2e+geom_point(size=3,alpha=0.7,aes(x=MDS1,y=MDS2,shape=group,colour=Treatment),data=nmds)+
+  labs(x="NMDS1",y="NMDS2",title = "Stress: Fluctuation(0.14) > Anaerobic(0.099) > Aerobic(0.091)",shape="Stage of succession")+
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 8,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "right",
+         legend.text = element_text(size = 10, face = "bold",family="serif"),
+         legend.title = element_text(size = 12, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))
+ggsave("result/figure1/figure2d.pdf",width=15,height=6.3,units = "in",bg="transparent")
+ggsave("result/figure1/figure2e.tiff",width=15,height=6.3,units = "in",bg="transparent")
+
+```
+###figrue2e indicator
+```{r}
+#指示物种分析
+res_sen <- read.csv("data/indicators.csv",row.names=1)
+res_sen.l <- res_sen %>% 
+  pivot_longer(cols=-c(Treatment,Type), names_to = "Rep", values_to = "Ratio")
+res_sen.l
+res.l <- subset(res_sen.l,Type=="Resistance")
+ren.l <- subset(res_sen.l,Type=="Sensitive")
+ggplot(res_sen.l, aes(x = Treatment, y = Ratio, colour = Treatment,fill=Treatment)) +
+  geom_boxplot(alpha=0.5) +
+  geom_jitter(width = 0.3, height = 0, alpha = 0.8, size = 8, aes(colour = Treatment)) +
+  geom_signif(comparisons = list(c("Aerobic", "Anaerobic"),
+                                 c("Anaerobic", "Fluctuation"),
+                                 c("Aerobic", "Fluctuation")),
+              map_signif_level = TRUE, size = 0.8, textsize = 8, family = "serif",y_position=c(6.8, 7.1,7.3)) +
+  labs(y = "Ratio of indictors(%)",Resistance="Resistance Indictors",Sensitive="Sensitive Indictors") +
+  facet_wrap(~ Type) +
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  scale_fill_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 16,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 16,family="serif"),
+         axis.title= element_text(face = "bold", size = 18, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 10,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "none",
+         plot.title = element_text(vjust = -6,hjust = 0), axis.ticks = element_line(size = 0.5),
+         axis.ticks.length.x = unit(-0.12, "cm"),
+         strip.text = element_text(face = "bold", size = 20, family = "serif"))
+ggsave("result/figure1/indictors.pdf",width=8,height=6,units = "in",bg="transparent")
+ggsave("result/figure1/indictors.tiff",width=15,height=6.3,units = "in",bg="transparent")
+
+```
+### drive avs
+```{r}
+#驱动差异群落变化绘图
+drive.bacteria <- read.csv("data/drive_bacteria.csv",row.names = 1)
+flu <- c(flu0,flu6,flu12,flu18,flu24,flu30)
+an <- c(an0,an6,an12,an18,an24,an30)
+ae <- c(ae0,ae6,ae12,ae18,ae24,ae30)
+flu.dri <- drive.bacteria[c("ASV5","ASV532","ASV4","ASV338","ASV289"),flu] %>% t() %>% data.frame()
+ae.dri <- drive.bacteria[c("ASV5","ASV9","ASV7","ASV261","ASV54"),ae] %>% t()%>% data.frame()
+an.dri <- drive.bacteria[c("ASV5","ASV72","ASV32","ASV4","ASV16"),an] %>% t()%>% data.frame()
+time <- c(rep("Intial",5),rep("Six",5),rep("Tweleve",5),rep("Eighteen",5),rep("Twenty Four",5),rep("Thirty",5))
+flu.dri$time <- factor(time,levels = c("Intial",'Six',"Tweleve","Eighteen","Twenty Four","Thirty"))
+flu.dri$Treatment <- "Fluctuation"
+ae.dri$time <- factor(time,levels = c("Intial",'Six',"Tweleve","Eighteen","Twenty Four","Thirty"))
+ae.dri$Treatment <- "Aerobic"
+an.dri$time <- factor(time,levels = c("Intial",'Six',"Tweleve","Eighteen","Twenty Four","Thirty"))
+an.dri$Treatment <- "Anaerobic"
+#宽表转长表
+flu.dri.l <- flu.dri %>% 
+  pivot_longer(cols=-c(time,Treatment), names_to = "ASV", values_to = "Abundance")#cols=-c()可以用来保留不转化的列,
+#names_to=""可以用来指定原来新表的列名，values_to数据列名
+ae.dri.l <- ae.dri %>% 
+  pivot_longer(cols=-c(time,Treatment), names_to = "ASV", values_to = "Abundance")
+an.dri.l <- an.dri %>% 
+  pivot_longer(cols=-c(time,Treatment), names_to = "ASV", values_to = "Abundance")
+ggplot(flu.dri.l, aes(x = time, y = Abundance)) +
+  geom_boxplot()+facet_wrap(~ASV,ncol = 1,scales = "free_y")
+ggplot(ae.dri.l, aes(x = time, y = Abundance)) +
+  geom_boxplot()+facet_wrap(~ASV,ncol = 1,scales = "free_y")
+```
+
+## 网络分析
+网络分析主要使用了[SpiecEasi](https://github.com/zdk123/SpiecEasi)包
+### 原始physeq文件过滤
+```{r filter}
+physeq.ra = rarefy_even_depth(physeq,rngseed = 800) #第一步先对按组内最少reads数进行抽平,并设置随机种子方便重复
+physeq.hig = filter_taxa(physeq.ra, function(x) sum(x > 3) > (0.2*length(x)), TRUE)
+#test_function <- function(x) { x >= 2 }#按在60%样本中reads>2的条件进行筛选
+#taxa.to.keep <- genefilter_sample(physeq.ra, test_function, A = 48)#设置筛选条件
+#Anaerobic1<-prune_taxa(taxa.to.keep, Anaerobic1)#按筛选条件进行过滤
+save(physeq,physeq.hig,physeq.ra,file = "physeq.RData")
+```
+### 选择核心物种用于后续网络构建
+利用分时间的网络筛选出各自的核心物种，然后分别绘制网络图。将betweenness centrality前50%，并且网站中心型低于50%的OTU作为核心物种。中位值median(),平均值mean(),用quantile(a,c(0,0.25,0.35,0.5,0.75,1))指定需要输出的分位值。
+```{r getkeystone}
+#波动组核心物种获取最后命名为key_flu
+key_flu1 <- read.table("result/network/spieceasi/Fluctuation/node.names-aerobic0-12.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_flu2 <- read.table("result/network/spieceasi/Fluctuation/node.names-aerobic6-18.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_flu3 <- read.table("result/network/spieceasi/Fluctuation/node.names-aerobic12-24.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_flu4 <- read.table("result/network/spieceasi/Fluctuation/node.names-aerobic18-30.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_flu <- unique(c(key_flu1$Taxonomy,key_flu2$Taxonomy,key_flu3$Taxonomy,key_flu4$Taxonomy))
+#波动组核心物种获取最后命名为key_ae
+key_ae1 <- read.table("result/network/spieceasi/aerobic/node.names-aerobic0-12.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_ae2 <- read.table("result/network/spieceasi/aerobic/node.names-aerobic6-18.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_ae3 <- read.table("result/network/spieceasi/aerobic/node.names-aerobic12-24.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_ae4 <- read.table("result/network/spieceasi/aerobic/node.names-aerobic18-30.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_ae <- unique(c(key_ae1$Taxonomy,key_ae2$Taxonomy,key_ae3$Taxonomy,key_ae4$Taxonomy))
+#厌氧组核心物种获取最后命名为key_an
+key_an1 <- read.table("result/network/spieceasi/anaerobic/node.names-anaerobic0-12.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_an2 <- read.table("result/network/spieceasi/anaerobic/node.names-anaerobic6-18.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_an3 <- read.table("result/network/spieceasi/anaerobic/node.names-anaerobic12-24.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_an4 <- read.table("result/network/spieceasi/anaerobic/node.names-anaerobic18-30.csv",sep = ",",header = T) %>% filter(Betweenness_centrality >= median(Betweenness_centrality),Alpha_centrality <= median(Alpha_centrality))
+key_an <- unique(c(key_an1$Taxonomy,key_an2$Taxonomy,key_an3$Taxonomy,key_an4$Taxonomy))
+#keystone <- unique(c(key_an,key_ae,key_flu))
+#physeq.key<-prune_taxa(keystone,physeq.hig)
+#save(physeq,physeq.key,file = "physeq.RData")
+```
+
+### 好氧组的微生物总体网络
+```{r getaerobicnetwork}
+physeq.key.ae <- prune_taxa(key_ae,physeq)
+aerobic <- subset_samples(physeq.key.ae,Treatment=="Aerobic")
+an.otu1<-as(otu_table(aerobic),"matrix")%>%t()
+CI.TAX<-as(tax_table(aerobic),"matrix")
+#进行网络计算
+start.time <- Sys.time()
+spieceasi.net <- spiec.easi(aerobic, method = 'mb',lambda.min.ratio=1e-3,
+                            nlambda=20,icov.select.params = list(rep.num = 5))
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+#检验参数设置是否合理
+getOptInd(spieceasi.net)
+# [1] 1
+sum(getRefit(spieceasi.net))/2
+# [1] 0
+#导出邻接矩阵
+spieceasi.matrix <- symBeta(getOptBeta(spieceasi.net), mode='maxabs')%>%as.matrix
+spieceasi.matrix.dsc <- spieceasi.matrix
+#为邻接矩阵添加名称
+rownames(spieceasi.matrix) <- colnames(an.otu1)
+colnames(spieceasi.matrix) <- colnames(an.otu1)
+otu.names <- colnames(an.otu1)
+#将邻接矩阵进行筛选，相关性小于0.1的赋值为0
+#spieceasi.matrix[abs(spieceasi.matrix)<=0.1] <- 0
+#从邻接矩阵中构建一个相关量化矩阵
+net <- graph.adjacency(spieceasi.matrix, mode = "undirected", 
+                       weighted = TRUE, diag = FALSE)
+V(net)$name <- otu.names
+#将相关性转化为距离
+net.dist <- net
+max(abs(E(net.dist)$weight))
+weights.dist <- 1 - abs(E(net.dist)$weight) 
+E(net.dist)$weight <- weights.dist
+#转化权重网络为网络绝对距离
+net.abs <- net
+E(net.abs)$weight <- abs(E(net.abs)$weight)
+#计算中心线矩阵
+# alpha centrality 
+net.alpha <- alpha.centrality(net)
+# degree distribution
+net.strength <- strength(net.abs)
+# betweenness centrality 
+bet <- igraph::betweenness(net.dist,v = V(net.dist))
+# make a summary of centrality metrics
+summary_cent <- as.data.frame(net.alpha)
+colnames(summary_cent) <- ("Alpha_centrality")
+rownames(summary_cent) <- colnames(an.otu1)
+summary_cent$Weighted_vertex_degree <- net.strength
+summary_cent$Betweenness_centrality <- bet
+metrics <- summary_cent
+metrics$ID <- row.names(metrics)
+write.table(metrics,"result/network/spieceasi/alltime/arobic_metricsall_1.csv",sep = ",",col.names = T,row.names = F)
+#Cluster nodes into modules (see Note 11)
+wt <- cluster_louvain(net, weights = E(net.dist)$weight)
+temp <- V(net)$name
+temp <- as.data.frame(temp)
+temp$louvain <- membership(wt)
+V(net)$louvain <- temp$louvain
+#9.将成员少于3个的model进行合并
+length(unique(temp$louvain))
+summary_modules <- data.frame(table(temp$louvain))
+colnames(summary_modules) <- c("louvain", "n")
+summary_modules
+modules <- as.numeric(summary_modules$louvain[which(summary_modules$n 
+                                                    >3)])
+x <- max(modules)+1
+for (i in c(1:length(temp$temp))) {
+  if(temp$louvain[i] %!in% modules){ 
+    temp$louvain[i] <- paste(x) 
+  }}
+modules <- temp
+modules$louvain <- as.numeric(modules$louvain)
+modules <- modules[order(modules$louvain),]
+module.lookup <-
+  data.frame("louvain"=unique(modules$louvain),"new_louvain" = 
+               c(1:length(unique(modules$louvain))))
+new <- merge(modules,module.lookup)
+modules <- new
+modules <- modules[,2:3]
+summary_modules <- data.frame(table(modules$new_louvain))
+summary_modules
+max(modules$new_louvain)
+#10. 验证中心性是否与物种丰度有关
+# to include multiple metrics in the same model they must be z score transformed to all be on the same scale
+# z score transformation
+metrics <- metrics[,-4]
+metrics.stand <- decostand(metrics, method = "standardize")
+# they also cannot be negative so we transform them all to make them positive
+x <- abs(floor(min(metrics.stand)))
+metrics.stand.abs <- metrics.stand + x
+# Extract the average abundance of each OTU
+av.abund <- as.data.frame(colMeans(an.otu1))
+colnames(av.abund) <- "average_abundance"
+#转化为相对丰度
+av.abund.re<-av.abund/colSums(av.abund)
+# test whether abundance of an OTU significantly influences how important it is in this network?
+adonis<-adonis2(metrics.stand.abs ~ av.abund$average_abundance)
+#non-sig
+#11. Differences in individual metrics between groups can also beevaluated.
+cor.abundwithalpha<-cor.test(av.abund$average_abundance, metrics$Alpha_centrality, method 
+         = "pearson")
+#p-value = 3.635e-07,95 percent confidence interval:0.1100573 0.2435014 sample estimates:cor 0.1775956 
+cor.abundwithdeg<-cor.test(av.abund$average_abundance, metrics$Weighted_vertex_degree, 
+         method = "pearson")
+#non-sig p-value = 0.4693 
+cor.abundwithbet<-cor.test(av.abund$average_abundance, metrics$Betweenness_centrality, 
+         method = "pearson")
+#p-value = 4.681e-05,-0.14253 
+
+#12. Test whether certain modules have higher centrality than other modules.
+# for this we will need to remove the x module category we created (no module)
+modules.test <- as.data.frame(modules[which(modules$new_louvain != 
+                                              x),])
+colnames(modules.test) <- c("OTU","louvain") 
+metrics.stand.abs.test <- metrics.stand.abs[which(modules$new_louvain 
+                                                  != x),]
+metrics.test <- metrics[which(modules$new_louvain != x),]
+# we now test whether modules differ when considering all metrics in a single model 
+adonis_centrality<-adonis2(metrics.stand.abs.test ~ modules.test$louvain)
+#R2=0.000184,Pr 0.865
+#13不同组别中的网络属性差异计算
+#order.alpha <- metrics[order(-metrics$Alpha_centrality),]#对OTU按中心性排序
+#top.alpha <- row.names(order.alpha)[1:10]
+#order.deg <- metrics[order(-metrics$Weighted_vertex_degree),]
+#top.deg <- row.names(order.deg)[1:10]
+#order.bet <- metrics[order(-metrics$Betweenness_centrality),]
+#top.bet <- row.names(order.bet)[1:10]
+#otu.table.age.alpha <- an.otu1[,top.alpha]
+#otu.table.age.deg <- an.otu1[,top.deg]
+#otu.table.age.bet <- an.otu1[,top.bet]
+#environment<-read.csv("data/metadata.csv",header = T,row.names = 1,sep = ",")
+#de.Anaerobic1<-design[rownames(an.otu1),]
+#ad.alp<-adonis2(otu.table.age.alpha ~ de.Anaerobic1$Exposue.Time)
+#ad.deg<-adonis2(otu.table.age.deg ~ de.Anaerobic1$Exposue.Time)
+#ad.bet<-adonis2(otu.table.age.bet ~ de.Anaerobic1$Exposue.Time)
+#筛选otu核心otu，我选择将三个top10进行合并
+#转化为gephi所需数据格式
+spieceasi.matrix.m <- melt(spieceasi.matrix)
+#name cols
+colnames(spieceasi.matrix.m) <- c("source","target","weight")
+# get the names of all nodes
+node.names <-
+  unique(c(as.character(unique(spieceasi.matrix.m$source)),as.character
+           (unique(spieceasi.matrix.m$target))))
+# number them as an alphabetical node list, write to a csv
+node.names <- as.data.frame(node.names)
+node.names <- as.data.frame(node.names)
+node.names$node_number <- c(1:length(node.names$node.names))
+node.names$node_number2 <- c(1:length(node.names$node.names))
+colnames(node.names) <- c("Taxonomy", "Label", "Id")
+row.names(node.names) <- node.names$Taxonomy
+row.names(modules) <- modules$temp
+modules <- modules[order(modules$temp),]
+row.names(node.names) ==row.names(metrics)
+row.names(node.names) ==row.names(modules)
+node.names.final <- cbind(node.names, metrics,modules)
+#为node.names.final添加物种分类门信息
+tax<-as(tax_table(physeq),"matrix")
+rownames(tax)
+tax.phy<-as.data.frame(tax[,"Phylum"])
+colnames(tax.phy)<-"Phylum"
+tax.phy<-merge(tax.phy,av.abund.re,by="row.names")
+node.names.final$Row.names=row.names(node.names.final)
+node.names.final1<-merge(node.names.final,tax.phy,by="Row.names")
+write.table(node.names.final1, "result/network/spieceasi/alltime/node.names-aerobicall_1.csv", sep = ",", row.names 
+            = FALSE)
+
+
+# create the edge list
+temp <- merge(x = spieceasi.matrix.m, y = node.names, by.x = 
+                "source", by.y = "Taxonomy")
+
+colnames(temp) <-
+  c("source","target","weight","remove","source_number")
+temp <- temp[,-4]
+edge.list <- merge(x = temp, y = node.names, by.x = "target", by.y = 
+                     "Taxonomy")
+colnames(edge.list) <- c("source","target","weight","source.number", 
+                         "target.number")
+edge.list <- edge.list[,c(3,4,6)]
+colnames(edge.list) <- c("weight","source","target")
+edge.list$Type <- "Undirected"
+negative <- ifelse(edge.list$weight<0, "negative", "positive")
+edge.list$Negative <- negative
+edge.list$weight <- abs(edge.list$weight)
+edge.list <- edge.list[which(abs(edge.list$weight)>0),]
+write.table(edge.list, "result/network/spieceasi/alltime/edge_list_aerobicall_1.csv", sep = ",", row.names = FALSE)
+spieceasi.matrix1<-spieceasi.matrix[spieceasi.matrix!=0]
+#需要把相关性导出成表格，另一列需要
+treatment <- c("aerobic")
+weight_distribution <- data.frame(weight=spieceasi.matrix1,group=treatment)
+write.table(weight_distribution,"result/network/spieceasi/alltime/weight_distribution_aerobic_1.csv", sep = ",", row.names = FALSE)
+```
+### 厌氧组微生物总体网络
+```{r getanaerobicnetwork}
+physeq.key.an <- prune_taxa(key_an,physeq)
+aerobic <- subset_samples(physeq.key.an,Treatment=="Anaerobic")
+aerobic <- subset_samples(physeq.key,Treatment=="Anaerobic")
+an.otu1<-as(otu_table(aerobic),"matrix")%>%t()
+CI.TAX<-as(tax_table(aerobic),"matrix")
+#进行网络计算
+start.time <- Sys.time()
+spieceasi.net <- spiec.easi(an.otu1, method = 'mb',lambda.min.ratio=1e-2,
+                            nlambda=20,icov.select.params = list(rep.num = 5))
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+#导出邻接矩阵
+spieceasi.matrix <- symBeta(getOptBeta(spieceasi.net), mode='maxabs')%>%as.matrix
+spieceasi.matrix.dsc <- spieceasi.matrix
+#为邻接矩阵添加名称
+rownames(spieceasi.matrix) <- colnames(an.otu1)
+colnames(spieceasi.matrix) <- colnames(an.otu1)
+otu.names <- colnames(an.otu1)
+#将邻接矩阵进行筛选，相关性小于0.1的赋值为0
+spieceasi.matrix[abs(spieceasi.matrix)<=0.1] <- 0
+#从邻接矩阵中构建一个相关量化矩阵
+net <- graph.adjacency(spieceasi.matrix, mode = "undirected", 
+                       weighted = TRUE, diag = FALSE)
+V(net)$name <- otu.names
+#将相关性转化为距离
+net.dist <- net
+max(abs(E(net.dist)$weight))
+weights.dist <- 1 - abs(E(net.dist)$weight) 
+E(net.dist)$weight <- weights.dist
+#转化权重网络为网络绝对距离
+net.abs <- net
+E(net.abs)$weight <- abs(E(net.abs)$weight)
+#计算中心线矩阵
+# alpha centrality 
+net.alpha <- alpha.centrality(net)
+# degree distribution
+net.strength <- strength(net.abs)
+# betweenness centrality 
+bet <- igraph::betweenness(net.dist,v = V(net.dist))
+# make a summary of centrality metrics
+summary_cent <- as.data.frame(net.alpha)
+colnames(summary_cent) <- ("Alpha_centrality")
+rownames(summary_cent) <- colnames(an.otu1)
+summary_cent$Weighted_vertex_degree <- net.strength
+summary_cent$Betweenness_centrality <- bet
+metrics <- summary_cent
+metrics$ID <- row.names(metrics)
+write.table(metrics,"result/network/spieceasi/alltime/anarobic_metricsall.csv",sep = ",",col.names = T,row.names = F)
+#Cluster nodes into modules (see Note 11)
+wt <- cluster_louvain(net, weights = E(net.dist)$weight)
+temp <- V(net)$name
+temp <- as.data.frame(temp)
+temp$louvain <- membership(wt)
+V(net)$louvain <- temp$louvain
+#9.将成员少于3个的model进行合并
+length(unique(temp$louvain))
+summary_modules <- data.frame(table(temp$louvain))
+colnames(summary_modules) <- c("louvain", "n")
+summary_modules
+modules <- as.numeric(summary_modules$louvain[which(summary_modules$n 
+                                                    >3)])
+x <- max(modules)+1
+for (i in c(1:length(temp$temp))) {
+  if(temp$louvain[i] %!in% modules){ 
+    temp$louvain[i] <- paste(x) 
+  }}
+modules <- temp
+modules$louvain <- as.numeric(modules$louvain)
+modules <- modules[order(modules$louvain),]
+module.lookup <-
+  data.frame("louvain"=unique(modules$louvain),"new_louvain" = 
+               c(1:length(unique(modules$louvain))))
+new <- merge(modules,module.lookup)
+modules <- new
+modules <- modules[,2:3]
+summary_modules <- data.frame(table(modules$new_louvain))
+summary_modules
+max(modules$new_louvain)
+#10. 验证中心性是否与物种丰度有关
+# to include multiple metrics in the same model they must be z score transformed to all be on the same scale
+# z score transformation
+metrics <- metrics[,-4]
+metrics.stand <- decostand(metrics, method = "standardize")
+# they also cannot be negative so we transform them all to make them positive
+x <- abs(floor(min(metrics.stand)))
+metrics.stand.abs <- metrics.stand + x
+# Extract the average abundance of each OTU
+av.abund <- as.data.frame(colMeans(an.otu1))
+colnames(av.abund) <- "average_abundance"
+#转化为相对丰度
+av.abund.re<-av.abund/colSums(av.abund)
+# test whether abundance of an OTU significantly influences how important it is in this network?
+adonis<-adonis2(metrics.stand.abs ~ av.abund$average_abundance)
+#non-sig
+#11. Differences in individual metrics between groups can also beevaluated.
+cor.abundwithalpha<-cor.test(av.abund$average_abundance, metrics$Alpha_centrality, method 
+         = "pearson")
+#p-value = 3.635e-07,95 percent confidence interval:0.1100573 0.2435014 sample estimates:cor 0.1775956 
+cor.abundwithdeg<-cor.test(av.abund$average_abundance, metrics$Weighted_vertex_degree, 
+         method = "pearson")
+#non-sig p-value = 0.4693 
+cor.abundwithbet<-cor.test(av.abund$average_abundance, metrics$Betweenness_centrality, 
+         method = "pearson")
+#p-value = 4.681e-05,-0.14253 
+
+#12. Test whether certain modules have higher centrality than other modules.
+# for this we will need to remove the x module category we created (no module)
+modules.test <- as.data.frame(modules[which(modules$new_louvain != 
+                                              x),])
+colnames(modules.test) <- c("OTU","louvain") 
+metrics.stand.abs.test <- metrics.stand.abs[which(modules$new_louvain 
+                                                  != x),]
+metrics.test <- metrics[which(modules$new_louvain != x),]
+# we now test whether modules differ when considering all metrics in a single model 
+adonis_centrality<-adonis2(metrics.stand.abs.test ~ modules.test$louvain)
+#R2=0.000184,Pr 0.865
+#13不同组别中的网络属性差异计算
+#order.alpha <- metrics[order(-metrics$Alpha_centrality),]#对OTU按中心性排序
+#top.alpha <- row.names(order.alpha)[1:10]
+#order.deg <- metrics[order(-metrics$Weighted_vertex_degree),]
+#top.deg <- row.names(order.deg)[1:10]
+#order.bet <- metrics[order(-metrics$Betweenness_centrality),]
+#top.bet <- row.names(order.bet)[1:10]
+#otu.table.age.alpha <- an.otu1[,top.alpha]
+#otu.table.age.deg <- an.otu1[,top.deg]
+#otu.table.age.bet <- an.otu1[,top.bet]
+#environment<-read.csv("data/metadata.csv",header = T,row.names = 1,sep = ",")
+#de.Anaerobic1<-design[rownames(an.otu1),]
+#ad.alp<-adonis2(otu.table.age.alpha ~ de.Anaerobic1$Exposue.Time)
+#ad.deg<-adonis2(otu.table.age.deg ~ de.Anaerobic1$Exposue.Time)
+#ad.bet<-adonis2(otu.table.age.bet ~ de.Anaerobic1$Exposue.Time)
+#筛选otu核心otu，我选择将三个top10进行合并
+#转化为gephi所需数据格式
+spieceasi.matrix.m <- melt(spieceasi.matrix)
+#name cols
+colnames(spieceasi.matrix.m) <- c("source","target","weight")
+# get the names of all nodes
+node.names <-
+  unique(c(as.character(unique(spieceasi.matrix.m$source)),as.character
+           (unique(spieceasi.matrix.m$target))))
+# number them as an alphabetical node list, write to a csv
+node.names <- as.data.frame(node.names)
+node.names <- as.data.frame(node.names)
+node.names$node_number <- c(1:length(node.names$node.names))
+node.names$node_number2 <- c(1:length(node.names$node.names))
+colnames(node.names) <- c("Taxonomy", "Label", "Id")
+row.names(node.names) <- node.names$Taxonomy
+row.names(modules) <- modules$temp
+modules <- modules[order(modules$temp),]
+row.names(node.names) ==row.names(metrics)
+row.names(node.names) ==row.names(modules)
+node.names.final <- cbind(node.names, metrics,modules)
+#为node.names.final添加物种分类门信息
+tax<-as(tax_table(physeq),"matrix")
+rownames(tax)
+tax.phy<-as.data.frame(tax[,"Phylum"])
+colnames(tax.phy)<-"Phylum"
+tax.phy<-merge(tax.phy,av.abund.re,by="row.names")
+node.names.final$Row.names=row.names(node.names.final)
+node.names.final1<-merge(node.names.final,tax.phy,by="Row.names")
+write.table(node.names.final1, "result/network/spieceasi/alltime/node.names-anaerobicall.csv", sep = ",", row.names 
+            = FALSE)
+
+
+# create the edge list
+temp <- merge(x = spieceasi.matrix.m, y = node.names, by.x = 
+                "source", by.y = "Taxonomy")
+
+colnames(temp) <-
+  c("source","target","weight","remove","source_number")
+temp <- temp[,-4]
+edge.list <- merge(x = temp, y = node.names, by.x = "target", by.y = 
+                     "Taxonomy")
+colnames(edge.list) <- c("source","target","weight","source.number", 
+                         "target.number")
+edge.list <- edge.list[,c(3,4,6)]
+colnames(edge.list) <- c("weight","source","target")
+edge.list$Type <- "Undirected"
+negative <- ifelse(edge.list$weight<0, "negative", "positive")
+edge.list$Negative <- negative
+edge.list$weight <- abs(edge.list$weight)
+edge.list <- edge.list[which(abs(edge.list$weight)>0),]
+write.table(edge.list, "result/network/spieceasi/alltime/edge_list_anaerobicall.csv", sep = ",", row.names = FALSE)
+spieceasi.matrix1<-spieceasi.matrix[spieceasi.matrix!=0]
+#需要把相关性导出成表格，另一列需要
+treatment <- c("aerobic")
+weight_distribution <- data.frame(weight=spieceasi.matrix1,group=treatment)
+write.table(weight_distribution,"result/network/spieceasi/alltime/weight_distribution_anaerobic.csv", sep = ",", row.names = FALSE)
+```
+### 波动组微生物总体网络
+```{r getfluctuation}
+physeq.key.flu <- prune_taxa(key_flu,physeq)
+aerobic <- subset_samples(physeq.key.flu,Treatment=="Fluctuation")
+an.otu1<-as(otu_table(aerobic),"matrix")%>%t()
+CI.TAX<-as(tax_table(aerobic),"matrix")
+#进行网络计算
+start.time <- Sys.time()
+spieceasi.net <- spiec.easi(an.otu1, method = 'mb',lambda.min.ratio=1e-2,
+                            nlambda=20,icov.select.params = list(rep.num = 5))
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken
+#导出邻接矩阵
+spieceasi.matrix <- symBeta(getOptBeta(spieceasi.net), mode='maxabs')%>%as.matrix
+spieceasi.matrix.dsc <- spieceasi.matrix
+#为邻接矩阵添加名称
+rownames(spieceasi.matrix) <- colnames(an.otu1)
+colnames(spieceasi.matrix) <- colnames(an.otu1)
+otu.names <- colnames(an.otu1)
+#将邻接矩阵进行筛选，相关性小于0.1的赋值为0
+#spieceasi.matrix[abs(spieceasi.matrix)<=0.1] <- 0
+#从邻接矩阵中构建一个相关量化矩阵
+net <- graph.adjacency(spieceasi.matrix, mode = "undirected", 
+                       weighted = TRUE, diag = FALSE)
+V(net)$name <- otu.names
+#将相关性转化为距离
+net.dist <- net
+max(abs(E(net.dist)$weight))
+weights.dist <- 1 - abs(E(net.dist)$weight) 
+E(net.dist)$weight <- weights.dist
+#转化权重网络为网络绝对距离
+net.abs <- net
+E(net.abs)$weight <- abs(E(net.abs)$weight)
+#计算中心线矩阵
+# alpha centrality 
+net.alpha <- alpha.centrality(net)
+# degree distribution
+net.strength <- strength(net.abs)
+# betweenness centrality 
+bet <- igraph::betweenness(net.dist,v = V(net.dist))
+# make a summary of centrality metrics
+summary_cent <- as.data.frame(net.alpha)
+colnames(summary_cent) <- ("Alpha_centrality")
+rownames(summary_cent) <- colnames(an.otu1)
+summary_cent$Weighted_vertex_degree <- net.strength
+summary_cent$Betweenness_centrality <- bet
+metrics <- summary_cent
+metrics$ID <- row.names(metrics)
+write.table(metrics,"result/network/spieceasi/alltime/fluctuation_metricsall1.csv",sep = ",",col.names = T,row.names = F)
+#Cluster nodes into modules (see Note 11)
+wt <- cluster_louvain(net, weights = E(net.dist)$weight)
+temp <- V(net)$name
+temp <- as.data.frame(temp)
+temp$louvain <- membership(wt)
+V(net)$louvain <- temp$louvain
+#9.将成员少于3个的model进行合并
+length(unique(temp$louvain))
+summary_modules <- data.frame(table(temp$louvain))
+colnames(summary_modules) <- c("louvain", "n")
+summary_modules
+modules <- as.numeric(summary_modules$louvain[which(summary_modules$n 
+                                                    >3)])
+x <- max(modules)+1
+for (i in c(1:length(temp$temp))) {
+  if(temp$louvain[i] %!in% modules){ 
+    temp$louvain[i] <- paste(x) 
+  }}
+modules <- temp
+modules$louvain <- as.numeric(modules$louvain)
+modules <- modules[order(modules$louvain),]
+module.lookup <-
+  data.frame("louvain"=unique(modules$louvain),"new_louvain" = 
+               c(1:length(unique(modules$louvain))))
+new <- merge(modules,module.lookup)
+modules <- new
+modules <- modules[,2:3]
+summary_modules <- data.frame(table(modules$new_louvain))
+summary_modules
+max(modules$new_louvain)
+#10. 验证中心性是否与物种丰度有关
+# to include multiple metrics in the same model they must be z score transformed to all be on the same scale
+# z score transformation
+metrics <- metrics[,-4]
+metrics.stand <- decostand(metrics, method = "standardize")
+# they also cannot be negative so we transform them all to make them positive
+x <- abs(floor(min(metrics.stand)))
+metrics.stand.abs <- metrics.stand + x
+# Extract the average abundance of each OTU
+av.abund <- as.data.frame(colMeans(an.otu1))
+colnames(av.abund) <- "average_abundance"
+#转化为相对丰度
+av.abund.re<-av.abund/colSums(av.abund)
+# test whether abundance of an OTU significantly influences how important it is in this network?
+adonis<-adonis2(metrics.stand.abs ~ av.abund$average_abundance)
+#non-sig
+#11. Differences in individual metrics between groups can also beevaluated.
+cor.abundwithalpha<-cor.test(av.abund$average_abundance, metrics$Alpha_centrality, method 
+         = "pearson")
+#p-value = 3.635e-07,95 percent confidence interval:0.1100573 0.2435014 sample estimates:cor 0.1775956 
+cor.abundwithdeg<-cor.test(av.abund$average_abundance, metrics$Weighted_vertex_degree, 
+         method = "pearson")
+#non-sig p-value = 0.4693 
+cor.abundwithbet<-cor.test(av.abund$average_abundance, metrics$Betweenness_centrality, 
+         method = "pearson")
+#p-value = 4.681e-05,-0.14253 
+
+#12. Test whether certain modules have higher centrality than other modules.
+# for this we will need to remove the x module category we created (no module)
+modules.test <- as.data.frame(modules[which(modules$new_louvain != 
+                                              x),])
+colnames(modules.test) <- c("OTU","louvain") 
+metrics.stand.abs.test <- metrics.stand.abs[which(modules$new_louvain 
+                                                  != x),]
+metrics.test <- metrics[which(modules$new_louvain != x),]
+# we now test whether modules differ when considering all metrics in a single model 
+adonis_centrality<-adonis2(metrics.stand.abs.test ~ modules.test$louvain)
+#R2=0.000184,Pr 0.865
+#13不同组别中的网络属性差异计算
+#order.alpha <- metrics[order(-metrics$Alpha_centrality),]#对OTU按中心性排序
+#top.alpha <- row.names(order.alpha)[1:10]
+#order.deg <- metrics[order(-metrics$Weighted_vertex_degree),]
+#top.deg <- row.names(order.deg)[1:10]
+#order.bet <- metrics[order(-metrics$Betweenness_centrality),]
+#top.bet <- row.names(order.bet)[1:10]
+#otu.table.age.alpha <- an.otu1[,top.alpha]
+#otu.table.age.deg <- an.otu1[,top.deg]
+#otu.table.age.bet <- an.otu1[,top.bet]
+#environment<-read.csv("data/metadata.csv",header = T,row.names = 1,sep = ",")
+#de.Anaerobic1<-design[rownames(an.otu1),]
+#ad.alp<-adonis2(otu.table.age.alpha ~ de.Anaerobic1$Exposue.Time)
+#ad.deg<-adonis2(otu.table.age.deg ~ de.Anaerobic1$Exposue.Time)
+#ad.bet<-adonis2(otu.table.age.bet ~ de.Anaerobic1$Exposue.Time)
+#筛选otu核心otu，我选择将三个top10进行合并
+#转化为gephi所需数据格式
+spieceasi.matrix.m <- melt(spieceasi.matrix)
+#name cols
+colnames(spieceasi.matrix.m) <- c("source","target","weight")
+# get the names of all nodes
+node.names <-
+  unique(c(as.character(unique(spieceasi.matrix.m$source)),as.character
+           (unique(spieceasi.matrix.m$target))))
+# number them as an alphabetical node list, write to a csv
+node.names <- as.data.frame(node.names)
+node.names <- as.data.frame(node.names)
+node.names$node_number <- c(1:length(node.names$node.names))
+node.names$node_number2 <- c(1:length(node.names$node.names))
+colnames(node.names) <- c("Taxonomy", "Label", "Id")
+row.names(node.names) <- node.names$Taxonomy
+row.names(modules) <- modules$temp
+modules <- modules[order(modules$temp),]
+row.names(node.names) ==row.names(metrics)
+row.names(node.names) ==row.names(modules)
+node.names.final <- cbind(node.names, metrics,modules)
+#为node.names.final添加物种分类门信息
+tax<-as(tax_table(physeq),"matrix")
+rownames(tax)
+tax.phy<-as.data.frame(tax[,"Phylum"])
+colnames(tax.phy)<-"Phylum"
+tax.phy<-merge(tax.phy,av.abund.re,by="row.names")
+node.names.final$Row.names=row.names(node.names.final)
+node.names.final1<-merge(node.names.final,tax.phy,by="Row.names")
+write.table(node.names.final1, "result/network/spieceasi/alltime/node.names-fluctuationall1.csv", sep = ",", row.names 
+            = FALSE)
+
+
+# create the edge list
+temp <- merge(x = spieceasi.matrix.m, y = node.names, by.x = 
+                "source", by.y = "Taxonomy")
+
+colnames(temp) <-
+  c("source","target","weight","remove","source_number")
+temp <- temp[,-4]
+edge.list <- merge(x = temp, y = node.names, by.x = "target", by.y = 
+                     "Taxonomy")
+colnames(edge.list) <- c("source","target","weight","source.number", 
+                         "target.number")
+edge.list <- edge.list[,c(3,4,6)]
+colnames(edge.list) <- c("weight","source","target")
+edge.list$Type <- "Undirected"
+negative <- ifelse(edge.list$weight<0, "negative", "positive")
+edge.list$Negative <- negative
+edge.list$weight <- abs(edge.list$weight)
+edge.list <- edge.list[which(abs(edge.list$weight)>0.3),]
+write.table(edge.list, "result/network/spieceasi/alltime/edge_list_fluctuationall1.csv", sep = ",", row.names = FALSE)
+spieceasi.matrix1<-spieceasi.matrix[spieceasi.matrix!=0]
+#需要把相关性导出成表格，另一列需要
+treatment <- c("aerobic")
+weight_distribution <- data.frame(weight=spieceasi.matrix1,group=treatment)
+write.table(weight_distribution,"result/network/spieceasi/alltime/weight_distribution_fluctuation1.csv", sep = ",", row.names = FALSE)
+```
+
+### 所有相关性分析
+#### 转化相关性表格
+```{r interaction}
+int_an_P <- read.table("result/network/inap/anaerobic/Galaxy212-[Correlation_matrix_pearson_(P-value)_Filtered_OTU_table].tabular",sep = "\t",row.names = 1,header = T)
+int_an_R  <- read.table("result/network/inap/anaerobic/Galaxy211-[Correlation_matrix_pearson_(adjacent)_Filtered_OTU_table].tabular",sep = "\t",row.names = 1,header = T)
+int_an_P $node1 = rownames(int_an_P )
+int_an_R$node1 = rownames(int_an_R)
+r_an = int_an_R %>%
+  gather(key = "node2",value = "r", -node1) %>%
+  data.frame()
+p_an = int_an_P  %>%
+  gather(key = "node2",value = "p",-node1) %>%
+  data.frame()
+# 将r值和p值合并为一个数据表
+corr.data.an <- merge(r_an,p_an,by=c("node1","node2"))
+corr.data.an
+# 确定相关性关系，不符合要求的r值删去(0.6稍微高了点)
+corr.data.an <- corr.data.an %>%
+  filter(p <= 0.01,node1 != node2)
+write.table(corr.data.an,"result/network/inap/anaerobic/inter_list.CSV",sep = ",")
+```
+把所有相关性按0.1进行输出
+```{r interaction plot}
+int_an_R$node1 = rownames(int_an_R)
+r_an = int_an_R %>%
+  gather(key = "node2",value = "r", -node1) %>%
+  data.frame()
+breaks <- seq(from=-1,to=1,by=0.1)#生成间隔表
+dlast <- table(cut(r_an$r, breaks = breaks))  #统计自定义区间频数
+dlast1 <- as.vector(dlast)#将频数转化成向量
+dlast2 <- round(dlast1/nrow(r_an)*100, digits = 4)                                                    #将频数转化为频率                                                                       #将频率转化成百分比，小数点位数4
+dl_anaerobic <- data.frame(dimnames(dlast),dlast1, dlast2)#生成以区间、频数、频率数据框
+colnames(dl_anaerobic) <- c("range","count","frequency","group")#给数据框加列名
+dl_anaerobic$group <- "anaerobic"
+
+diag(int_ae_R) <- 0
+int_ae_R$node1 = rownames(int_ae_R)
+r_ae = int_ae_R %>%
+  gather(key = "node2",value = "r", -node1) %>%
+  data.frame()
+dlast <- table(cut(r_ae$r, breaks = breaks))  #统计自定义区间频数
+dlast1 <- as.vector(dlast)#将频数转化成向量
+dlast2 <- round(dlast1/nrow(r_ae)*100, digits = 4)                                                    #将频数转化为频率                                                                       #将频率转化成百分比，小数点位数4
+dl_aerobic <- data.frame(dimnames(dlast),dlast1, dlast2)#生成以区间、频数、频率数据框
+colnames(dl_aerobic) <- c("range","count","frequency")#给数据框加列名
+colnames(dl_aerobic) <- c("range","count","frequency","group")
+dl_aerobic$group <- "aerobic"
+rownames(dl_aerobic)
+diag(int_flu_R) <- 0
+int_flu_R$node1 = rownames(int_flu_R)
+r_flu = int_flu_R %>%
+  gather(key = "node2",value = "r", -node1) %>%
+  data.frame()
+r_flu$r <- as.numeric(r_flu$r)
+dlast <- table(cut(r_flu$r, breaks = breaks))  #统计自定义区间频数
+dlast1 <- as.vector(dlast)#将频数转化成向量
+dlast2 <- round(dlast1/nrow(r_flu)*100, digits = 4)                                                    #将频数转化为频率                                                                       #将频率转化成百分比，小数点位数4
+dl_fluctuation <- data.frame(dimnames(dlast),dlast1, dlast2)#生成以区间、频数、频率数据框
+colnames(dl_fluctuation) <- c("range","count","frequency")#给数据框加列名
+dl_fluctuation$group <- "fluctuation"
+#plot
+dl <- rbind.data.frame(dl_fluctuation,dl_aerobic,dl_anaerobic)
+#确定x轴排序
+le=c(dl_fluctuation$range)
+dl$range <- 
+  factor(dl$range, levels = le)
+#修改分组图例名称,并且改变柱状图的排列顺序
+dl$group<-factor(dl$group,
+                 levels = c('aerobic','anaerobic','fluctuation'),
+                 labels = c("Aerobic","Anaerobic","Fluctuation"))
+colnames(dl) <- c("range","count","frequency","Treatment")
+p <- ggplot(dl,aes(x=range,y = frequency,fill=Treatment))+
+  geom_bar(stat = 'identity',
+           position = 'dodge', #可以该柱子分布方式，fill填充，stack堆砌
+           width = 0.8,)+      #设置柱子宽度,使变量之间分开      
+  #geom_text(aes(label=frequency),size=4,
+  #position = position_dodge(width = 0.8), #相应的注释宽度也调整
+  #vjust=-0.3)+    #调节注释高度    
+  labs(x="Strength of correlation",y="Frequency(%)")+
+  theme_test()+theme(plot.title=element_text(hjust=0.5,size=16,face="bold", family="serif"),
+                     axis.text=element_text(size=8,face="bold", family="serif",colour = "black"),
+                     axis.title.x=element_text(size=14, family="serif",face = "bold"),
+                     axis.title.y=element_text(size=14, family="serif",face = "bold"))+
+  scale_y_continuous(expand = c(0,0))+
+  scale_fill_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+#可以改变图例的顺序
+  theme(legend.title = element_text(colour="black", size=14, face="bold",family="serif",))+
+  theme(legend.text = element_text(colour="black", size = 12, face = "bold",family="serif"),
+        legend.position = c(0.9,0.8))+theme(
+          panel.background = element_rect(fill = "transparent"), # bg of the panel
+          plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+          panel.grid.major = element_blank(), # get rid of major grid
+          panel.grid.minor = element_blank(), # get rid of minor grid
+          legend.background = element_rect(fill = "transparent"), # get rid of legend bg
+          #legend.box.background = element_rect(fill = "transparent") # get rid of legend panel bg
+        )#指定图例字体位置，x，y的相对位置
+p
+ggsave("result/network/inap/分组网络相关分布图.pdf",width=10,height=4,units = "in",bg="transparent")
+ggsave("result/network/inap/分组网络相关分布图.tiff",width=10,height=4,units = "in",bg="transparent")
+
+
+```
+### 不同网络物种组成NMDS分析
+```{r}
+rm(list=ls())
+load("physeq.RData")
+otu_ae <- as(otu_table(physeq.ae),"matrix") %>% t() %>% data.frame() 
+otu_an <- as(otu_table(physeq.an),"matrix") %>% t() %>% data.frame()
+otu_flu <- as(otu_table(physeq.flu),"matrix") %>% t() %>% data.frame()
+#将OTU表格进行满联结
+otu1 <- otu_ae %>% full_join(otu_an) %>% full_join(otu_flu)#左边的数据在新的dataframe的前部
+row_names <- c(rownames(otu_ae),rownames(otu_an),rownames(otu_flu))
+group <- c(c(rep("Aerobic",25)),c(rep("Anaerobic",25)),c(rep("Fluctuation",25)))
+rownames(otu1) <- row_names #给予行名
+otu1[is.na(otu1)] <- 0#将NA赋值为0
+otu_table<- decostand(otu1, method = "total")
+otu.distance <- vegdist(otu_table, method = "bray")
+nmds_results <- metaMDS(otu.distance, k = 5)#k增加会增加距离
+#提取出nmds分析点的坐标
+point <- nmds_results[["points"]] %>% data.frame()
+point$group <- group
+mm <- ggplot(point, aes(x = MDS1 ,y = MDS2, colour=group)) + 
+  geom_point(size = 8, alpha = 0.75) + 
+  labs(x = "NMDS1", y = "NMDS2",title = "Stress = 0.031") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 14,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "bottom",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+         scale_colour_manual(name="Treatment",values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))
+mm
+mm+theme(legend.background = element_rect(fill = "transparent"))
+ggsave("result/network/stability/网络群落构成NMS.pdf",width=4.67,height=4.22,units = "in",bg="transparent")
+ggsave("result/network/stability/网络群落构成NMS.tiff",width=4.67,height=4.22,units = "in",bg="transparent")
+```
+
+### 用mental test分析抗生素对组成网络物种变化解释程度
+```{r}
+library(vegan)
+
+#otu表格纵向为样本横向为
+#计算物种组成的bray—curtis距离
+dist.abund.ae <- vegdist(otu.ae, method = 'bray')
+
+#计算花鸟卷因子之间的距离，一般用euclidean距离
+#在计算之前需要先进行标准化
+
+env.ae.m <- env.ae[ ,c(1,2,8,9,10)]
+scale.env.ae.m  <- scale(env.ae.m, center = TRUE, scale = TRUE)
+dist.env.ae <- dist(scale.env.ae.m, method = 'euclidean')
+
+#根据经纬度，计算样方间实际的地理距离(可以通过样本经纬度计算实际距离的包)
+#geo <- data.frame(df$Longitude, df$Latitude)
+#d.geo <- distm(geo, fun = distHaversine)       #library(geosphere)
+#dist.geo <- as.dist(d.geo)
+
+#进行mental test检验
+#物种丰度和 5 种环境组合的相关性，以 spearman 相关系数为例，9999 次置换检验显著性
+m.en.ae <- mantel(dist.abund.ae, dist.env.ae, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m.en.ae
+#r= 0.4658,p=1e-04
+#其中具体的抗生素的选择作用
+anti.ae <- env.ae$antibiotics
+dist.anti.ae <- dist(anti.ae, method = 'euclidean')
+m.anti.ae <-  mantel(dist.abund.ae, dist.anti.ae, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m.anti.ae
+#r= 0.4883. p=0.0001
+
+#基于bray-curtis距离将抗生素与物种丰度变化进行出图
+#将上文获得的距离测度，转化为数据框，一一对应起来
+da.ae <- as.vector(dist.abund.ae)
+an.ae <- as.vector(dist.anti.ae)
+#gg <- as.vector(dist.geo)
+mat.ae <- data.frame(da.ae,an.ae)
+
+#基于物种丰度的距离与基于温度指标的距离之间的相关性散点图，上文已知二者显著相关；同时颜色表示样方间地理距离
+mm <- ggplot(mat.ae, aes(y = da.ae , x = an.ae)) + 
+  geom_point(size = 4, alpha = 0.75, colour = "#7fc97f",shape = 21,fill="#7fc97f") + 
+  geom_smooth(method = "lm", colour = "black", alpha = 0.2) + 
+  labs(x = "Difference in TC concentration(%) ", y = "Bray-Curtis Dissimilarity", fill = "Aerobic",title = "R=0.4883 p=0.0001") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "italic",colour = "black", size = 8,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "top",
+         legend.text = element_text(size = 10, face = "bold"),
+         legend.title = element_text(size = 11, face = "bold")) +
+  scale_fill_continuous(high = "navy", low = "skyblue")+
+  scale_x_continuous(expand = c(0,0))
+
+mm
+
+ggsave("result/network/inap/好氧化与抗生素关系.pdf",width=10,height=6,units = "in",bg="transparent")
+ggsave("result/network/inap/好氧与抗生素关系.tiff",width=10,height=6,units = "in",bg="transparent")
+
+####波动组
+dist.abund.flu <- vegdist(otu.flu, method = 'bray')
+
+#计算花鸟卷因子之间的距离，一般用euclidean距离
+#在计算之前需要先进行标准化
+
+env.flu.m <- env.flu[ ,c(1,2,8,9,10)]
+scale.env.flu.m  <- scale(env.flu.m, center = TRUE, scale = TRUE)
+dist.env.flu <- dist(scale.env.flu.m, method = 'euclidean')
+
+#根据经纬度，计算样方间实际的地理距离(可以通过样本经纬度计算实际距离的包)
+#geo <- data.frame(df$Longitude, df$Latitude)
+#d.geo <- distm(geo, fun = distHaversine)       #library(geosphere)
+#dist.geo <- as.dist(d.geo)
+
+#进行mental test检验
+#物种丰度和 5 种环境组合的相关性，以 spearman 相关系数为例，9999 次置换检验显著性
+m.en.flu <- mantel(dist.abund.flu, dist.env.flu, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m.en.flu
+#r= 0.4658,p=1e-04
+#其中具体的抗生素的选择作用
+anti.flu <- env.flu$antibiotics
+dist.anti.flu <- dist(anti.flu, method = 'euclidean')
+m.anti.flu <-  mantel(dist.abund.flu, dist.anti.flu, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m.anti.flu
+#r= 0.4883. p=0.0001
+
+#基于bray-curtis距离将抗生素与物种丰度变化进行出图
+#将上文获得的距离测度，转化为数据框，一一对应起来
+da.flu <- as.vector(dist.abund.flu)
+an.flu <- as.vector(dist.anti.flu)
+#gg <- as.vector(dist.geo)
+mat.flu <- data.frame(da.flu,an.flu)
+
+#基于物种丰度的距离与基于温度指标的距离之间的相关性散点图，上文已知二者显著相关；同时颜色表示样方间地理距离
+mm <- ggplot(mat.flu, aes(y = da.flu , x = an.flu)) + 
+  geom_point(size = 4, alpha = 0.75, colour = "#fdc086",shape = 21,fill="#fdc086") + 
+  geom_smooth(method = "lm", colour = "black", alpha = 0.2) + 
+  labs(x = "Difference in TC concentration(%) ", y = "Bray-Curtis Dissimilarity", fill = "Aerobic",title = "R=0.2145 p=2e-04") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "italic",colour = "black", size = 8,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "top",
+         legend.text = element_text(size = 10, face = "bold"),
+         legend.title = element_text(size = 11, face = "bold")) +
+  scale_fill_continuous(high = "navy", low = "skyblue")+
+  scale_x_continuous(expand = c(0,0))
+
+mm
+
+ggsave("result/network/inap/波动与抗生素关系.pdf",width=10,height=6,units = "in",bg="transparent")
+ggsave("result/network/inap/波动与抗生素关系.tiff",width=10,height=6,units = "in",bg="transparent")
+
+####厌氧组
+dist.abund.an <- vegdist(otu.an, method = 'bray')
+
+#计算环境因子之间的距离，一般用euclidean距离
+#在计算之前需要先进行标准化
+
+env.an.m <- env.an[ ,c(1,2,8,9,10)]
+scale.env.an.m  <- scale(env.an.m, center = TRUE, scale = TRUE)
+dist.env.an <- dist(scale.env.an.m, method = 'euclidean')
+
+#根据经纬度，计算样方间实际的地理距离(可以通过样本经纬度计算实际距离的包)
+#geo <- data.frame(df$Longitude, df$Latitude)
+#d.geo <- distm(geo, fun = distHaversine)       #library(geosphere)
+#dist.geo <- as.dist(d.geo)
+
+#进行mental test检验
+#物种丰度和 5 种环境组合的相关性，以 spearman 相关系数为例，9999 次置换检验显著性
+m.en.an <- mantel(dist.abund.an, dist.env.an, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m.en.an
+#r= 0.4658,p=1e-04
+#其中具体的抗生素的选择作用
+anti.an <- env.an$antibiotics
+dist.anti.an <- dist(anti.an, method = 'euclidean')
+m.anti.an <-  mantel(dist.abund.an, dist.anti.an, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m.anti.an
+#r= 0.4883. p=0.0001
+
+#基于bray-curtis距离将抗生素与物种丰度变化进行出图
+#将上文获得的距离测度，转化为数据框，一一对应起来
+da.an <- as.vector(dist.abund.an)
+an.an <- as.vector(dist.anti.an)
+#gg <- as.vector(dist.geo)
+mat.an <- data.frame(da.an,an.an)
+
+#基于物种丰度的距离与基于温度指标的距离之间的相关性散点图，上文已知二者显著相关；同时颜色表示样方间地理距离
+mm <- ggplot(mat.an, aes(y = da.an , x = an.an)) + 
+  geom_point(size = 4, alpha = 0.75, colour = "#beaed4",shape = 21,fill="#beaed4") + 
+  geom_smooth(method = "lm", colour = "black", alpha = 0.2) + 
+  labs(x = "Difference in TC concentration(%) ", y = "Bray-Curtis Dissimilarity", fill = "Aerobic",title = "R=0.02953 p=0.3223") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "italic",colour = "black", size = 8,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "top",
+         legend.text = element_text(size = 10, face = "bold"),
+         legend.title = element_text(size = 11, face = "bold")) +
+  scale_fill_continuous(high = "navy", low = "skyblue")+
+  scale_x_continuous(expand = c(0,0))
+
+mm
+
+ggsave("result/network/inap/厌氧与抗生素关系.pdf",width=10,height=6,units = "in",bg="transparent")
+ggsave("result/network/inap/厌氧与抗生素关系.tiff",width=10,height=6,units = "in",bg="transparent")
+
+```
+#### 网络物种组成随时间演化距离计算并pca出图
+
+```{r 计算网络物种随时间变化排序并输出}
+#用phyloseq的ordinate进行降维分析
+p_ae <- plot_ordination(physeq.ae, ord_ae, color = "Treatment", shape = "Exposue.Time")
+p.ae <- data.frame(p_ae$data)
+#用ggplot2个性化输出结果
+mm <- ggplot(p.ae, aes(x = Axis.1 ,y = Axis.2)) + 
+  geom_point(size = 8, alpha = 0.75, colour = "#7fc97f",fill="#7fc97f",aes(shape =Exposue.Time)) + 
+  labs(x = "PCoA1 ", y = "PCoA2", fill = "Aerobic",title = "R=0.775 p=0.001") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 14,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "none",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))
+
+mm
+ggsave("result/network/inap/好氧演化.pdf",width=10,height=6,units = "in",bg="transparent")
+ggsave("result/network/inap/好氧演化.tiff",width=10,height=6,units = "in",bg="transparent")
+#厌氧组
+ord_an <- ordinate(physeq.an, method = "MDS", distance = "bray")
+p_an <- plot_ordination(physeq.an, ord_an, color = "Treatment", shape = "Exposue.Time")
+p.an <- data.frame(p_an$data)
+#用ggplot2个性化输出结果
+mm <- ggplot(p.an, aes(x = Axis.1 ,y = Axis.2)) + 
+  geom_point(size = 8, alpha = 0.75, colour = "#beaed4",fill="#beaed4",aes(shape =Exposue.Time)) + 
+  labs(x = "PCoA1 ", y = "PCoA2", fill = "Aerobic",title = "R=0.783 p=0.001") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 14,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "none",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))
+
+mm
+ggsave("result/network/inap/厌氧演化.pdf",width=10,height=6,units = "in",bg="transparent")
+ggsave("result/network/inap/厌氧演化.tiff",width=10,height=6,units = "in",bg="transparent")
+#波动组
+ord_flu <- ordinate(physeq.flu, method = "MDS", distfluce = "bray")
+p_flu <- plot_ordination(physeq.flu, ord_flu, color = "Treatment", shape = "Exposue.Time")
+p.flu <- data.frame(p_flu$data)
+#用ggplot2个性化输出结果
+mm <- ggplot(p.flu, aes(x = Axis.1 ,y = Axis.2)) + 
+  geom_point(size = 8, alpha = 0.75, colour = "#fdc086",fill="#fdc086",aes(shape =Exposue.Time)) + 
+  labs(x = "PCoA1 ", y = "PCoA2", fill = "Aerobic",title = "R=0.731 p=0.001") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 14,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "bottom",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))
+mm
+ggsave("result/network/inap/波动演化.pdf",width=10,height=6,units = "in",bg="transparent")
+ggsave("result/network/inap/波动演化.tiff",width=10,height=7.5,units = "in",bg="transparent")
+
+```
+#### 抗生素浓度变化对网络物种的贡献度
+```{r adonis}
+inap_ae <- read.table(file="result/network/inap/aerobic/node_aerobic.csv",sep = ",",header = T)
+id_ae <- c(inap_ae$ID)
+physeq.ae <- subset_samples(physeq.ae,Treatment=="Aerobic")
+inap_an <- read.table(file="result/network/inap/anaerobic/node_anaerobic.csv",sep = ",",header = T)
+id_an <- c(inap_an$ID)
+physeq.an <-subset_samples(physeq.an,Treatment=="Anaerobic")
+inap_flu <- read.table(file="result/network/inap/fluctuation/node_fluctuation.csv",sep = ",",header = T)
+id_flu <- c(inap_flu$ID)
+physeq.flu <- subset_samples(physeq.flu,Treatment=="Fluctuation")
+
+otu.ae <- as(otu_table(physeq.ae),"matrix") %>% t()
+env.ae <- as(sample_data(physeq.ae),"data.frame")
+ae.adonis <- adonis2(otu.ae ~ antibiotics*eh,data=env.ae)
+
+otu.an <- as(otu_table(physeq.an),"matrix") %>% t()
+env.an <- as(sample_data(physeq.an),"data.frame")
+an.adonis <- adonis2(otu.an ~ antibiotics*eh,data=env.an)
+
+otu.flu <- as(otu_table(physeq.flu),"matrix") %>% t()
+env.flu <- as(sample_data(physeq.flu),"data.frame")
+flu.adonis <- adonis2(otu.flu ~ antibiotics*eh,data=env.flu)
+```
+#### 抗性基因丰度与物种组成之间的关系
+```{r}
+#用ggcor做mental test的展示，otu表格横向为物种信息，纵向为样本
+library(phyloseq)
+load("physeq.RData")
+#提取各自的OTU表格
+otu_ae <- as(otu_table(physeq.ae),"matrix") %>% t() %>% data.frame() 
+otu_an <- as(otu_table(physeq.an),"matrix") %>% t() %>% data.frame()
+otu_flu <- as(otu_table(physeq.flu),"matrix") %>% t() %>% data.frame()
+#将OTU表格进行满联结
+otu1 <- otu_ae %>% full_join(otu_an) %>% full_join(otu_flu)#左边的数据在新的dataframe的前部
+row_names <- c(rownames(otu_ae),rownames(otu_an),rownames(otu_flu))
+group <- c(c(rep("Aerobic_Community",25)),c(rep("Anaerobic_Community",25)),c(rep("Fluctuation_Community",25)))
+rownames(otu1) <- row_names #给予行名
+otu1[is.na(otu1)] <- 0#将NA赋值为0
+#合并环境因子
+##提取各组环境因子表
+env_ae <- as(sample_data(physeq.ae),"matrix") %>% data.frame()
+env_an <- as(sample_data(physeq.an),"matrix") %>% data.frame()
+env_flu <- as(sample_data(physeq.flu),"matrix") %>% data.frame()
+##进行满连结
+env <- env_ae %>% full_join(env_an ) %>% full_join(env_flu)
+env <- env[,1:10] %>% as_tibble()
+colnames(env)
+write.table(env,"env.csv",sep=",",row.names = T)
+env <- read.table("env.csv",header=T,row.names=1,sep=",")
+rownames(env) <- rownames(otu1)
+#对数据进行标准化处理
+##注意 MARGIN=1，每行为一个样本，MARGIN=2，每列为一个样本
+# winsconsin默认为MARGIN=2
+wisconsin(t(otu1)) %>% t() %>%data.frame() ->otu
+#先对环境因子中的抗性基因丰度进行log10处理
+env[,3:7] <- log10(env[,3:7])
+
+#mantel_test计算获物种或者环境因子之间相关性
+# group为一个对行名进行分类的向量
+mantel <- mantel_test(spec =otu ,env=env,group = group) %>%
+  mutate(rd = cut(r,breaks = c(-Inf,0.2,0.4,Inf),   # 定义Mantel的R值范围标签，便于出图
+                  labels = c("< 0.2","0.2 - 0.4", ">=0.4")),
+         pd = cut(p.value,breaks = c(-Inf,0.001,0.01,0.05,Inf), # 定义Mantel检验的p值范围标签，便于出图
+                  labels = c("< 0.01","0.001 - 0.01", "0.01 - 0.05",">=0.05")),
+         lty = cut(r,breaks = c(-Inf,0,Inf), # 定义线形，正相关实线，负相关虚线
+                   labels = c("r <= 0","r > 0")))
+mantel$spec <- mantel$.group
+mantel <- mantel_test(spec =otu1,env=env,group = group,spec.dist.method = "bray",
+                      env.dist.method = "euclidean")%>%
+  mutate(rd = cut(r,breaks = c(-Inf,0.2,0.4,Inf), 
+                  labels = c("< 0.2","0.2 - 0.4", ">=0.4")),
+         pd = cut(p.value,breaks = c(-Inf,0.001,0.01,0.05,Inf),
+                  labels = c("< 0.01","0.001 - 0.01", "0.01 - 0.05",">=0.05")),
+         lty = cut(r,breaks = c(-Inf,0,Inf),
+                   labels = c("r <= 0","r > 0")))
+mantel$spec <- mantel$.group
+quickcor(env, type = "upper",show.diag = FALSE,legend.position = "left") +
+  geom_square() +
+  anno_link(aes(colour = pd, size = rd), data = mantel,curvature = 0.1,label.size = 5,label.family="serif",
+            label.colour="black",label.fontface = 2,nudge_x = -1.8) +
+  scale_size_manual(values = c(0.5, 1, 2)) +
+  scale_colour_manual(values = c("#D95F02","#009966","#f6e78b","#e4e4e2")) +
+  guides(size = guide_legend(title = "Mantel's abs(r)",
+                             override.aes = list(colour = "grey35"), 
+                             family="serif",
+                             order = 2),
+         colour = guide_legend(title = "Mantel's p", 
+                               override.aes = list(size = 3), 
+                               order = 1, family="serif"),
+         fill = guide_colorbar(title = "Pearson's r", order = 3, family="serif"))
+ggsave("result/network/inap/标准化分布图.pdf",width=10,height=6,units = "in",bg="transparent")
+ggsave("result/network/inap/标准化分布图.tiff",width=10,height=6,units = "in",bg="transparent")
+
+```
+
+### 网络稳定性分析
+#### 好氧网络与随机网络稳定性分析和出图
+```{r aerobic}
+# 共现网络的稳定性计算
+##核心思路，随机去除节点，然后观察网络连通性改变
+###第一步：计算邻接网络的连通性，网络连通性函数
+rm(list = ls())
+nc <- function(adj_matrix) {
+  #获取 0-1 矩阵，1 表示节点间存在边，0 表示不存在边
+  adj_matrix <- as.matrix(adj_matrix)
+  adj_matrix[abs(adj_matrix) != 0] <- 1
+  
+  #矩阵的特征分解，获取特征值 λ
+  lambda <- eigen(adj_matrix, only.values = TRUE)$values
+  lambda <- sort(lambda, decreasing = TRUE)
+  
+  #计算“平均特征根”，获得自然连通度
+  lambda_sum <- 0
+  N = length(lambda)
+  for (i in 1:N) lambda_sum = lambda_sum + exp(lambda[i])
+  lambda_average <- log(lambda_sum/N, base = exp(1))
+  lambda_average
+}
+adj_matrix <- read.table('./data/stability/Galaxy201-[Whole_Network_matrix_0.82_RMT_result].tabular', row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity <- nc(adj_matrix)
+natural_connectivity
+set.seed(123)
+#移除的个数需要少于节点数目
+
+for (i in 1:200) {
+  
+  #在邻接矩阵中随机移除 i 个节点
+  remove_node <- sample(1:284, i)
+  adj_matrix2 <- adj_matrix[-remove_node,-remove_node]
+  
+  #计算自然连通度
+  natural_connectivity_remove <- nc(adj_matrix2)
+  natural_connectivity <- c(natural_connectivity, natural_connectivity_remove)
+}
+
+
+
+dat <- data.frame(remove_node = 0:200, natural_connectivity = natural_connectivity)
+#新生成的连通性表称为 natural_connectivity 
+#ggplot2 散点图+拟合线，展示随机移除节点后网络的自然连通度
+library(ggplot2)
+# 用ggplot2输出稳定性随节点移除图
+#出图
+ggplot(dat, aes(remove_node, natural_connectivity)) +
+  geom_point(size = 8, alpha = 0.75, colour = "#7fc97f",fill="#7fc97f") +
+  labs(x = "No.of Node Remove  ", y = "Natural Connectivity") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 14,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "none",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_x_continuous(expand = c(0,0))+
+  geom_smooth(colour = "#7fc97f", alpha = 0.4)
+
+
+## 用相同节点和边的网络构建随机网络，并计算连通性
+library(igraph)
+
+#以广义随机图为例，首先需要定义图的集合
+# 利用函数graph_from_adjacency_matrix 构建igraph对象，_adj_matrix_为需要分析的对象
+g <- graph_from_adjacency_matrix(as.matrix(adj_matrix), mode = 'undirected', diag = FALSE)
+degree_dist <- table(degree(g))#table(degree())获得点的联通度分布表
+degree_num <- as.numeric(names(degree_dist))# degress_dist的行名就是节点degree个数,保存为degree_num
+degree_count <- as.numeric(degree_dist)# 获得degree为n的节点个数m，保存为degree_count
+names(degree_count) <- degree_num
+degs <- rep(degree_num, degree_count)# 用rep函数构建了构建随机网络需要的degree和count属性表，degs
+
+# 利用igraph中degree.sequence.game获得随机网络邻接图
+set.seed(123)
+g_rand1 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand1 <- as.matrix(get.adjacency(g_rand1))
+g_rand2 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand2 <- as.matrix(get.adjacency(g_rand2))
+g_rand3 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand3 <- as.matrix(get.adjacency(g_rand3))
+
+#计算构建的随机网络联通度
+natural_connectivity_rand1 <- nc(adj_matrix_rand1)
+natural_connectivity_rand2 <- nc(adj_matrix_rand2)
+natural_connectivity_rand3 <- nc(adj_matrix_rand3)
+natural_connectivity_rand1
+natural_connectivity_rand2
+natural_connectivity_rand3
+
+# 随机网络进行结点移除并计算连通性
+for (i in 1:200) {
+  
+  #在邻接矩阵中随机移除 i 个节点
+  remove_node <- sample(1:284, i)
+  adj_matrix_rand1_remove <- adj_matrix_rand1[-remove_node,-remove_node]
+  adj_matrix_rand2_remove <- adj_matrix_rand2[-remove_node,-remove_node]
+  adj_matrix_rand3_remove <- adj_matrix_rand3[-remove_node,-remove_node]
+  
+  #计算自然连通度
+  natural_connectivity_rand1 <- c(natural_connectivity_rand1, nc(adj_matrix_rand1_remove))
+  natural_connectivity_rand2 <- c(natural_connectivity_rand2, nc(adj_matrix_rand2_remove))
+  natural_connectivity_rand3 <- c(natural_connectivity_rand3, nc(adj_matrix_rand3_remove))
+}
+#ggplot2 作图，微生物网络和随机网络一起，拟合线
+
+dat <- data.frame(remove_node = rep(0:200, 4), 
+                  natural_connectivity = c(natural_connectivity, natural_connectivity_rand1, natural_connectivity_rand2, natural_connectivity_rand3), 
+                  network = c(rep('Aerobic Microbial Network', 201), rep('Aerobic Random Network 1', 201), rep('Aerobic Random Network 2', 201), rep('Aerobic Random Network 3', 201)))
+write.csv(dat, './result/network/stability/波动网络稳定与随机比较.csv', row.names = FALSE, quote = FALSE)
+
+ggplot(dat, aes(remove_node, natural_connectivity, color = network)) +
+  geom_point(size = 8, alpha = 0.75)+
+  labs(x = "No.of Node Remove  ", y = "Natural Connectivity",title = "Aerobic Network vs Random Network") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 16,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "right",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_x_continuous(expand = c(0,0))+
+  geom_smooth(se = FALSE)
+ggsave("result/network/stability/好氧与随机对比.pdf",width=10,height=4,units = "in",bg="transparent")
+ggsave("result/network/stability/好氧与随机对比.tiff",width=10,height=4,units = "in",bg="transparent")
+# 
+```
+#### 厌氧网络与随机网络稳定性分析和出图
+```{r}
+# 共现网络的稳定性计算
+##核心思路，随机去除节点，然后观察网络连通性改变
+###第一步：计算邻接网络的连通性，网络连通性函数
+rm(list = ls())
+nc <- function(adj_matrix) {
+  #获取 0-1 矩阵，1 表示节点间存在边，0 表示不存在边
+  adj_matrix <- as.matrix(adj_matrix)
+  adj_matrix[abs(adj_matrix) != 0] <- 1
+  
+  #矩阵的特征分解，获取特征值 λ
+  lambda <- eigen(adj_matrix, only.values = TRUE)$values
+  lambda <- sort(lambda, decreasing = TRUE)
+  
+  #计算“平均特征根”，获得自然连通度
+  lambda_sum <- 0
+  N = length(lambda)
+  for (i in 1:N) lambda_sum = lambda_sum + exp(lambda[i])
+  lambda_average <- log(lambda_sum/N, base = exp(1))
+  lambda_average
+}
+adj_matrix <- read.table('./data/stability/Galaxy215-[Whole_Network_matrix_0.88_RMT_result].tabular', row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity <- nc(adj_matrix)
+natural_connectivity
+set.seed(123)
+#移除的个数需要少于节点数目
+
+for (i in 1:133) {
+  
+  #在邻接矩阵中随机移除 i 个节点
+  remove_node <- sample(1:189, i)
+  adj_matrix2 <- adj_matrix[-remove_node,-remove_node]
+  
+  #计算自然连通度
+  natural_connectivity_remove <- nc(adj_matrix2)
+  natural_connectivity <- c(natural_connectivity, natural_connectivity_remove)
+}
+
+#ggplot2 散点图+拟合线，展示随机移除节点后网络的自然连通度
+library(ggplot2)
+
+dat <- data.frame(remove_node = 0:133, natural_connectivity = natural_connectivity)
+#新生成的连通性表称为 natural_connectivity 
+# 用ggplot2输出稳定性随节点移除图
+#出图
+ggplot(dat, aes(remove_node, natural_connectivity)) +
+  geom_point(size = 8, alpha = 0.75, colour = "#7fc97f",fill="#7fc97f") +
+  labs(x = "No.of Node Remove  ", y = "Natural Connectivity") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 14,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "none",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_x_continuous(expand = c(0,0))+
+  geom_smooth(colour = "#7fc97f", alpha = 0.4)
+
+
+## 用相同节点和边的网络构建随机网络，并计算连通性
+library(igraph)
+
+#以广义随机图为例，首先需要定义图的集合
+# 利用函数graph_from_adjacency_matrix 构建igraph对象，_adj_matrix_为需要分析的对象
+g <- graph_from_adjacency_matrix(as.matrix(adj_matrix), mode = 'undirected', diag = FALSE)
+degree_dist <- table(degree(g))#table(degree())获得点的联通度分布表
+degree_num <- as.numeric(names(degree_dist))# degress_dist的行名就是节点degree个数,保存为degree_num
+degree_count <- as.numeric(degree_dist)# 获得degree为n的节点个数m，保存为degree_count
+names(degree_count) <- degree_num
+degs <- rep(degree_num, degree_count)# 用rep函数构建了构建随机网络需要的degree和count属性表，degs
+
+# 利用igraph中degree.sequence.game获得随机网络邻接图
+set.seed(123)
+g_rand1 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand1 <- as.matrix(get.adjacency(g_rand1))
+g_rand2 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand2 <- as.matrix(get.adjacency(g_rand2))
+g_rand3 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand3 <- as.matrix(get.adjacency(g_rand3))
+
+#计算构建的随机网络联通度
+natural_connectivity_rand1 <- nc(adj_matrix_rand1)
+natural_connectivity_rand2 <- nc(adj_matrix_rand2)
+natural_connectivity_rand3 <- nc(adj_matrix_rand3)
+natural_connectivity_rand1
+natural_connectivity_rand2
+natural_connectivity_rand3
+
+# 随机网络进行结点移除并计算连通性
+for (i in 1:133) {
+  
+  #在邻接矩阵中随机移除 i 个节点
+  remove_node <- sample(1:189, i)
+  adj_matrix_rand1_remove <- adj_matrix_rand1[-remove_node,-remove_node]
+  adj_matrix_rand2_remove <- adj_matrix_rand2[-remove_node,-remove_node]
+  adj_matrix_rand3_remove <- adj_matrix_rand3[-remove_node,-remove_node]
+  
+  #计算自然连通度
+  natural_connectivity_rand1 <- c(natural_connectivity_rand1, nc(adj_matrix_rand1_remove))
+  natural_connectivity_rand2 <- c(natural_connectivity_rand2, nc(adj_matrix_rand2_remove))
+  natural_connectivity_rand3 <- c(natural_connectivity_rand3, nc(adj_matrix_rand3_remove))
+}
+#ggplot2 作图，微生物网络和随机网络一起，拟合线
+
+dat <- data.frame(remove_node = rep(0:133, 4), 
+                  natural_connectivity = c(natural_connectivity, natural_connectivity_rand1, natural_connectivity_rand2, natural_connectivity_rand3), 
+                  network = c(rep('Anaerobic Microbial Network', 134), rep('Anaerobic Random Network 1', 134), rep('Anaerobic Random Network 2', 134), rep('Anaerobic Random Network 3', 134)))
+write.csv(dat, './result/network/stability/厌氧网络稳定与随机比较.csv', row.names = FALSE, quote = FALSE)
+
+ggplot(dat, aes(remove_node, natural_connectivity, color = network)) +
+  geom_point(size = 8, alpha = 0.75)+
+  labs(x = "No.of Node Remove  ", y = "Natural Connectivity",title = "Anaerobic Network vs Random Network") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 16,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "right",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_x_continuous(expand = c(0,0))+
+  geom_smooth(se = FALSE)
+ggsave("result/network/stability/厌氧与随机对比.pdf",width=10,height=4,units = "in",bg="transparent")
+ggsave("result/network/stability/厌氧与随机对比.tiff",width=10,height=4,units = "in",bg="transparent")
+# 
+
+```
+
+#### 波动网络与随机网络稳定性分析出图
+```{r}
+# 共现网络的稳定性计算
+##核心思路，随机去除节点，然后观察网络连通性改变
+###第一步：计算邻接网络的连通性，网络连通性函数
+rm(list = ls())
+nc <- function(adj_matrix) {
+  #获取 0-1 矩阵，1 表示节点间存在边，0 表示不存在边
+  adj_matrix <- as.matrix(adj_matrix)
+  adj_matrix[abs(adj_matrix) != 0] <- 1
+  
+  #矩阵的特征分解，获取特征值 λ
+  lambda <- eigen(adj_matrix, only.values = TRUE)$values
+  lambda <- sort(lambda, decreasing = TRUE)
+  
+  #计算“平均特征根”，获得自然连通度
+  lambda_sum <- 0
+  N = length(lambda)
+  for (i in 1:N) lambda_sum = lambda_sum + exp(lambda[i])
+  lambda_average <- log(lambda_sum/N, base = exp(1))
+  lambda_average
+}
+adj_matrix <- read.table('./data/stability/Galaxy235-[Whole_Network_matrix_0.84_RMT_result].tabular', row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity <- nc(adj_matrix)
+natural_connectivity
+set.seed(123)
+#移除的个数需要少于节点数目
+
+for (i in 1:189) {
+  
+  #在邻接矩阵中随机移除 i 个节点
+  remove_node <- sample(1:269, i)
+  adj_matrix2 <- adj_matrix[-remove_node,-remove_node]
+  
+  #计算自然连通度
+  natural_connectivity_remove <- nc(adj_matrix2)
+  natural_connectivity <- c(natural_connectivity, natural_connectivity_remove)
+}
+
+#ggplot2 散点图+拟合线，展示随机移除节点后网络的自然连通度
+library(ggplot2)
+
+dat <- data.frame(remove_node = 0:189, natural_connectivity = natural_connectivity)
+#新生成的连通性表称为 natural_connectivity 
+# 用ggplot2输出稳定性随节点移除图
+#出图
+ggplot(dat, aes(remove_node, natural_connectivity)) +
+  geom_point(size = 8, alpha = 0.75, colour = "#7fc97f",fill="#7fc97f") +
+  labs(x = "No.of Node Remove  ", y = "Natural Connectivity") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 14,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "none",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_x_continuous(expand = c(0,0))+
+  geom_smooth(colour = "#7fc97f", alpha = 0.4)
+
+
+## 用相同节点和边的网络构建随机网络，并计算连通性
+library(igraph)
+
+#以广义随机图为例，首先需要定义图的集合
+# 利用函数graph_from_adjacency_matrix 构建igraph对象，_adj_matrix_为需要分析的对象
+g <- graph_from_adjacency_matrix(as.matrix(adj_matrix), mode = 'undirected', diag = FALSE)
+degree_dist <- table(degree(g))#table(degree())获得点的联通度分布表
+degree_num <- as.numeric(names(degree_dist))# degress_dist的行名就是节点degree个数,保存为degree_num
+degree_count <- as.numeric(degree_dist)# 获得degree为n的节点个数m，保存为degree_count
+names(degree_count) <- degree_num
+degs <- rep(degree_num, degree_count)# 用rep函数构建了构建随机网络需要的degree和count属性表，degs
+
+# 利用igraph中degree.sequence.game获得随机网络邻接图
+set.seed(123)
+g_rand1 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand1 <- as.matrix(get.adjacency(g_rand1))
+g_rand2 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand2 <- as.matrix(get.adjacency(g_rand2))
+g_rand3 <- degree.sequence.game(degs, method = 'simple')
+adj_matrix_rand3 <- as.matrix(get.adjacency(g_rand3))
+
+#计算构建的随机网络联通度
+natural_connectivity_rand1 <- nc(adj_matrix_rand1)
+natural_connectivity_rand2 <- nc(adj_matrix_rand2)
+natural_connectivity_rand3 <- nc(adj_matrix_rand3)
+natural_connectivity_rand1
+natural_connectivity_rand2
+natural_connectivity_rand3
+
+# 随机网络进行结点移除并计算连通性
+for (i in 1:189) {
+  
+  #在邻接矩阵中随机移除 i 个节点
+  remove_node <- sample(1:269, i)
+  adj_matrix_rand1_remove <- adj_matrix_rand1[-remove_node,-remove_node]
+  adj_matrix_rand2_remove <- adj_matrix_rand2[-remove_node,-remove_node]
+  adj_matrix_rand3_remove <- adj_matrix_rand3[-remove_node,-remove_node]
+  
+  #计算自然连通度
+  natural_connectivity_rand1 <- c(natural_connectivity_rand1, nc(adj_matrix_rand1_remove))
+  natural_connectivity_rand2 <- c(natural_connectivity_rand2, nc(adj_matrix_rand2_remove))
+  natural_connectivity_rand3 <- c(natural_connectivity_rand3, nc(adj_matrix_rand3_remove))
+}
+#ggplot2 作图，微生物网络和随机网络一起，拟合线
+
+dat <- data.frame(remove_node = rep(0:189, 4), 
+                  natural_connectivity = c(natural_connectivity, natural_connectivity_rand1, natural_connectivity_rand2, natural_connectivity_rand3), 
+                  network = c(rep('Fluctuation Microbial Network', 190), rep('Fluctuation Random Network 1', 190), rep('Fluctuation Random Network 2', 190), rep('Fluctuation Random Network 3', 190)))
+write.csv(dat, './result/network/stability/波动网络稳定与随机比较.csv', row.names = FALSE, quote = FALSE)
+
+ggplot(dat, aes(remove_node, natural_connectivity, color = network)) +
+  geom_point(size = 8, alpha = 0.75)+
+  labs(x = "No.of Node Remove  ", y = "Natural Connectivity",title = "Fluctuation Network vs Random Network") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 16,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "right",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_x_continuous(expand = c(0,0))+
+  geom_smooth(se = FALSE)
+ggsave("result/network/stability/波动与随机对比.pdf",width=10,height=4,units = "in",bg="transparent")
+ggsave("result/network/stability/波动与随机对比.tiff",width=10,height=4,units = "in",bg="transparent")
+# 
+
+```
+
+
+
+#### 随机去除节点稳定性评价
+```{r}
+rm(list = ls())
+dat_ae <- read.table(file="result/network/stability/好氧网络稳定与随机比较.csv",sep=",",header = T)
+dat_an <- read.table(file="result/network/stability/厌氧网络稳定与随机比较.csv",sep=",",header = T)
+dat_flu <- read.table(file="result/network/stability/波动网络稳定与随机比较.csv",sep=",",header = T)
+dat_ae$remove_pre <- as.numeric(dat_ae$remove_node/284*100)
+dat_an$remove_pre <- as.numeric(dat_an$remove_node/189*100)
+dat_flu$remove_pre <- as.numeric(dat_flu$remove_node/269*100)
+dat_ae$con_pre <- as.numeric(dat_ae$natural_connectivity/17.69*100)
+dat_an$con_pre <- as.numeric(dat_an$natural_connectivity/16.31*100)
+dat_flu$con_pre <- as.numeric(dat_flu$natural_connectivity/29.82*100)
+dat <- data.frame(rbind(dat_ae[1:201,],dat_an[1:134,],dat_flu[1:190,]))
+p <- ggplot(dat, aes(remove_pre,con_pre,colour=Treatment)) +
+  geom_point(size = 8, alpha = 0.75)+
+  labs(x = "Percent of Node Remove(%)  ", y = "Relative Natural Connectivity(%)") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 16,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_x_continuous(expand = c(0,0))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  geom_smooth()
+p
+p+theme(legend.position = c(0.98, 0.98),
+        legend.justification = c(1,1),
+        legend.background = element_rect(fill = "transparent"))
+ggsave("result/network/stability/网络稳定性对比.pdf",width=10,height=4,units = "in",bg="transparent")
+ggsave("result/network/stability/网络稳定性对比.tiff",width=10,height=4,units = "in",bg="transparent")
+
+```
+
+
+
+#### 多次模拟网络稳定性
+```{r}
+rm(list = ls())
+# 好氧稳定性计算
+nc <- function(adj_matrix) {
+  #获取 0-1 矩阵，1 表示节点间存在边，0 表示不存在边
+  adj_matrix <- as.matrix(adj_matrix)
+  adj_matrix[abs(adj_matrix) != 0] <- 1
+  
+  #矩阵的特征分解，获取特征值 λ
+  lambda <- eigen(adj_matrix, only.values = TRUE)$values
+  lambda <- sort(lambda, decreasing = TRUE)
+  
+  #计算“平均特征根”，获得自然连通度
+  lambda_sum <- 0
+  N = length(lambda)
+  for (i in 1:N) lambda_sum = lambda_sum + exp(lambda[i])
+  lambda_average <- log(lambda_sum/N, base = exp(1))
+  lambda_average
+}
+adj_matrix_ae <- read.table('./data/stability/Galaxy201-[Whole_Network_matrix_0.82_RMT_result].tabular', 
+                         row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity_ae <- nc(adj_matrix_ae)
+natural_connectivity_ae
+set.seed(123) # 设置随机数种子，以便复制结果
+
+simulations <- 20 # 模拟次数
+results_ae <- list() # 创建一个空列表，用于存储每次模拟的结果
+
+for (j in 1:simulations) {
+  natural_connectivity_ae <- numeric() # 创建一个空向量，用于存储一次模拟的结果
+  for (i in 1:200) {
+    remove_node_ae <- sample(1:284, i) # 从 284 个点中随机选择 i 个点
+    adj_matrix2_ae <- adj_matrix_ae[-remove_node_ae,-remove_node_ae] # 删除选择的点
+    natural_connectivity_remove_ae <- nc(adj_matrix2_ae) # 计算删除点后的自然连通性
+    natural_connectivity_ae <- c(natural_connectivity_ae, natural_connectivity_remove_ae) # 将结果添加到向量中
+  }
+  results_ae[[j]] <- data.frame(remove_node = 1:200, 
+                                natural_connectivity = natural_connectivity_ae,
+                                Treatment ="Aerobic") # 将一次模拟的结果存储为数据框，并添加分组注释
+}
+
+# 查看一次模拟的结果
+head(results_ae[[1]])
+# 模拟结果进行合并命名为dat_ae
+dat_ae <- do.call(rbind,results_ae)
+dat_ae$remove_pre <- as.numeric(dat_ae$remove_node/284*100)
+dat_ae$con_pre <- as.numeric(dat_ae$natural_connectivity/17.69*100)
+robustness_ae <- filter(dat_ae,remove_node==142)#得到去除50节点的稳定性结果
+
+# dat_ae为所有模拟计算结果
+
+
+
+# 厌氧网络稳定性计算
+adj_matrix_an <- read.table('./data/stability/Galaxy215-[Whole_Network_matrix_0.88_RMT_result].tabular',
+                            row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity_an <- nc(adj_matrix_an)
+natural_connectivity_an
+set.seed(123) # 设置随机数种子，以便复制结果
+
+simulations <- 20 # 模拟次数
+results_an <- list() # 创建一个空列表，用于存储每次模拟的结果
+
+for (j in 1:simulations) {
+  natural_connectivity_an <- numeric() # 创建一个空向量，用于存储一次模拟的结果
+  for (i in 1:133) {
+    remove_node_an <- sample(1:189, i) # 从 284 个点中随机选择 i 个点
+    adj_matrix2_an <- adj_matrix_an[-remove_node_an,-remove_node_an] # 删除选择的点
+    natural_connectivity_remove_an <- nc(adj_matrix2_an) # 计算删除点后的自然连通性
+    natural_connectivity_an <- c(natural_connectivity_an, natural_connectivity_remove_an) # 将结果添加到向量中
+  }
+  results_an[[j]] <- data.frame(remove_node = 1:133, 
+                                natural_connectivity = natural_connectivity_an,
+                                Treatment ="Anaerobic") # 将一次模拟的结果存储为数据框，并添加分组注释
+}
+
+# 查看一次模拟的结果
+head(results_an[[1]])
+# 模拟结果进行合并命名为dat_an
+dat_an <- do.call(rbind,results_an)
+dat_an$remove_pre <- as.numeric(dat_an$remove_node/189*100)
+dat_an$con_pre <- as.numeric(dat_an$natural_connectivity/16.31*100)
+robustness_an <- filter(dat_an,remove_node==95)#得到去除50%节点的稳定性结果
+
+
+# 波动组
+adj_matrix_flu <-  read.table('./data/stability/Galaxy235-[Whole_Network_matrix_0.84_RMT_result].tabular',
+                              row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity_flu <- nc(adj_matrix_flu)
+natural_connectivity_flu
+set.seed(123) # 设置随机数种子，以便复制结果
+
+results_flu <- list() # 创建一个空列表，用于存储每次模拟的结果
+
+for (j in 1:simulations) {
+  natural_connectivity_flu <- numeric() # 创建一个空向量，用于存储一次模拟的结果
+  for (i in 1:189) {
+    remove_node_flu <- sample(1:269, i) # 从 284 个点中随机选择 i 个点
+    adj_matrix2_flu <- adj_matrix_flu[-remove_node_flu,-remove_node_flu] # 删除选择的点
+    natural_connectivity_remove_flu <- nc(adj_matrix2_flu) # 计算删除点后的自然连通性
+    natural_connectivity_flu <- c(natural_connectivity_flu, natural_connectivity_remove_flu) # 将结果添加到向量中
+  }
+  results_flu[[j]] <- data.frame(remove_node = 1:189, 
+                                 natural_connectivity = natural_connectivity_flu,
+                                 Treatment ="Fluctuation") # 将一次模拟的结果存储为数据框，并添加分组注释
+}
+
+# 查看一次模拟的结果
+head(results_flu[[1]])
+# 模拟结果进行合并命名为dat_flu
+dat_flu <- do.call(rbind,results_flu)
+dat_flu$remove_pre <- as.numeric(dat_flu$remove_node/269*100)
+dat_flu$con_pre <- as.numeric(dat_flu$natural_connectivity/29.82*100)
+robustness_flu <- filter(dat_flu,remove_node==134)#得到去除50节点的稳定性结果
+
+# 合并数据并做箱线图
+# Combine the data into a single data frame
+data.df <- rbind(robustness_ae,robustness_an,robustness_flu) %>% data.frame
+data.df$Treatment <- factor(data.df$Treatment,levels = c("Aerobic","Anaerobic","Fluctuation"))
+# Perform a Tukey test to determine if there is a significant difference between the three sets of data
+tukey.test <- TukeyHSD(aov(con_pre ~ Treatment, data = data.df))
+
+ggplot(data, aes(x = group, y = value)) +
+  geom_boxplot() +
+  geom_jitter(width=0.2, height=0, alpha=0.5)
+  geom_errorbar(limits = result$conf.int, width = 0.3) +
+  ggtitle(paste("Two-Sample T-Test (t =", round(result$statistic, 2), 
+                ", df =", round(result$parameter, 2), 
+                ", p-value =", round(result$p.value, 4), ")")) +
+  xlab("Group") +
+  ylab("Value")
+
+```
+#### 50%去除多次模拟
+```{r}
+rm(list = ls())
+# 好氧稳定性计算
+nc <- function(adj_matrix) {
+  #获取 0-1 矩阵，1 表示节点间存在边，0 表示不存在边
+  adj_matrix <- as.matrix(adj_matrix)
+  adj_matrix[abs(adj_matrix) != 0] <- 1
+  
+  #矩阵的特征分解，获取特征值 λ
+  lambda <- eigen(adj_matrix, only.values = TRUE)$values
+  lambda <- sort(lambda, decreasing = TRUE)
+  
+  #计算“平均特征根”，获得自然连通度
+  lambda_sum <- 0
+  N = length(lambda)
+  for (i in 1:N) lambda_sum = lambda_sum + exp(lambda[i])
+  lambda_average <- log(lambda_sum/N, base = exp(1))
+  lambda_average
+}
+adj_matrix_ae <- read.table('./data/stability/Galaxy201-[Whole_Network_matrix_0.82_RMT_result].tabular', 
+                            row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity_ae <- nc(adj_matrix_ae)
+natural_connectivity_ae
+set.seed(123) # 设置随机数种子，以便复制结果
+
+simulations <- 100 # 模拟次数
+results_ae <- list() # 创建一个空列表，用于存储每次模拟的结果
+
+for (j in 1:simulations) {
+  natural_connectivity_ae <- numeric() # 创建一个空向量，用于存储一次模拟的结果
+  remove_node_ae <- sample(1:284, 142) # 从 284 个点中随机选择 i 个点
+    adj_matrix2_ae <- adj_matrix_ae[-remove_node_ae,-remove_node_ae] # 删除选择的点
+    natural_connectivity_remove_ae <- nc(adj_matrix2_ae) # 计算删除点后的自然连通性
+    natural_connectivity_ae <- c(natural_connectivity_ae, natural_connectivity_remove_ae) # 将结果添加到向量中
+  results_ae[[j]] <- data.frame(remove_node = 142, 
+                                natural_connectivity = natural_connectivity_ae,
+                                Treatment ="Aerobic") # 将一次模拟的结果存储为数据框，并添加分组注释
+}
+
+# 查看一次模拟的结果
+head(results_ae[[1]])
+# 模拟结果进行合并命名为dat_ae
+dat_ae <- do.call(rbind,results_ae)
+dat_ae$con_pre <- as.numeric(dat_ae$natural_connectivity/17.69*100)
+
+# dat_ae为所有模拟计算结果
+
+
+
+# 厌氧网络稳定性计算
+adj_matrix_an <- read.table('./data/stability/Galaxy215-[Whole_Network_matrix_0.88_RMT_result].tabular',
+                            row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity_an <- nc(adj_matrix_an)
+natural_connectivity_an
+set.seed(123) # 设置随机数种子，以便复制结果
+
+simulations <- 100 # 模拟次数
+results_an <- list() # 创建一个空列表，用于存储每次模拟的结果
+
+for (j in 1:simulations) {
+  natural_connectivity_an <- numeric() # 创建一个空向量，用于存储一次模拟的结果
+  remove_node_an <- sample(1:189, 95) # 从 189 个点中随机去除95 个点
+  adj_matrix2_an <- adj_matrix_an[-remove_node_an,-remove_node_an] # 删除选择的点
+  natural_connectivity_remove_an <- nc(adj_matrix2_an) # 计算删除点后的自然连通性
+  natural_connectivity_an <- c(natural_connectivity_an, natural_connectivity_remove_an) # 将结果添加到向量中
+  results_an[[j]] <- data.frame(remove_node = 95, 
+                                natural_connectivity = natural_connectivity_an,
+                                Treatment ="Anaerobic") # 将一次模拟的结果存储为数据框，并添加分组注释
+}
+
+# 查看一次模拟的结果
+head(results_an[[1]])
+# 模拟结果进行合并命名为dat_an
+dat_an <- do.call(rbind,results_an)
+dat_an$con_pre <- as.numeric(dat_an$natural_connectivity/16.31*100)
+
+
+# 波动组
+adj_matrix_flu <-  read.table('./data/stability/Galaxy235-[Whole_Network_matrix_0.84_RMT_result].tabular',
+                              row.names = 1, sep = '\t',header = T)
+#计算自然联通度
+natural_connectivity_flu <- nc(adj_matrix_flu)
+natural_connectivity_flu
+set.seed(123) # 设置随机数种子，以便复制结果
+
+results_flu <- list() # 创建一个空列表，用于存储每次模拟的结果
+
+for (j in 1:simulations) {
+  natural_connectivity_flu <- numeric() # 创建一个空向量，用于存储一次模拟的结果
+  remove_node_flu <- sample(1:269, 134) # 从 284 个点中随机选择 i 个点
+  adj_matrix2_flu <- adj_matrix_flu[-remove_node_flu,-remove_node_flu] # 删除选择的点
+  natural_connectivity_remove_flu <- nc(adj_matrix2_flu) # 计算删除点后的自然连通性
+  natural_connectivity_flu <- c(natural_connectivity_flu, natural_connectivity_remove_flu) # 将结果添加到向量中
+  results_flu[[j]] <- data.frame(remove_node = 134, 
+                                 natural_connectivity = natural_connectivity_flu,
+                                 Treatment ="Fluctuation") # 将一次模拟的结果存储为数据框，并添加分组注释
+}
+
+# 查看一次模拟的结果
+head(results_flu[[1]])
+# 模拟结果进行合并命名为dat_flu
+dat_flu <- do.call(rbind,results_flu)
+dat_flu$con_pre <- as.numeric(dat_flu$natural_connectivity/29.82*100)
+
+# 合并数据并做箱线图
+# Combine the data into a single data frame
+data.df <- rbind(dat_ae,dat_an,dat_flu) %>% data.frame
+data.df$Treatment <- factor(data.df$Treatment,levels = c("Aerobic","Anaerobic","Fluctuation"))
+# Perform a Tukey test to determine if there is a significant difference between the three sets of data
+tukey.test <- TukeyHSD(aov(con_pre ~ Treatment, data = data.df))
+# 利用library(ggsignif)进行显著性差异标记
+
+p <- ggplot(data.df, aes(x = Treatment, y = con_pre, fill=Treatment)) +
+  geom_boxplot(size=2,aes(fill = Treatment,colour= Treatment),alpha=0.5) +
+  geom_jitter(width=0.3, height=0, alpha=0.8, size=6, aes(colour = Treatment))+
+  labs(y="Roubtness")+
+  theme_test()+theme(plot.title=element_text(hjust=0.5,size=16,face="bold", family="serif"),
+                     axis.text=element_text(size=8,face="bold", family="serif",colour = "black"),
+                     axis.title.x=element_text(size=14, family="serif",face = "bold"),
+                     axis.title.y=element_text(size=14, family="serif",face = "bold"),
+                     panel.background = element_rect(fill = "transparent"), # bg of the panel
+                     plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+                     panel.grid.major = element_blank(), # get rid of major grid
+                     panel.grid.minor = element_blank(), # get rid of minor grid
+                     legend.position = "none")+ # remove legend
+  scale_fill_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  geom_signif(comparisons = list(c("Aerobic", "Anaerobic"),
+                                 c("Anaerobic", "Fluctuation"),
+                                 c("Aerobic", "Fluctuation")),
+              map_signif_level=TRUE,y_position=c(67, 72, 75),size = 0.8,textsize = 5,family="serif")
+p+theme(panel.border = element_rect(size = 0.5, fill = NA, color = "black"),axis.ticks = element_line(size = 0.5),
+        axis.ticks.length.x = unit(-0.12, "cm"))
+ggsave("result/network/stability/100次模拟网络稳定.pdf",width=4.67,height=4.22,units = "in",bg="transparent")
+ggsave("result/network/stability/100次模拟网络稳定.tiff",width=4.67,height=4.22,units = "in",bg="transparent")
+
+```
+
+#### 按degree去除节点
+```{r}
+rm(list = ls())
+#好氧组
+
+a=read.csv("result/network/inap/aerobic/Galaxy202-[Whole_Network_Gephi_Edge_attribute_0.82_RMT_result].csv",
+           header = TRUE) ###读取edge文件
+a$Source=as.factor(a$Source)
+a$Target=as.factor(a$Target)
+b=a[,c(1,3)]
+b=t(b)
+b=t(b)
+ig=graph_from_edgelist(b,directed=FALSE)#生成了
+natcon <- function(ig) {
+  N   <- vcount(ig)
+  adj <- get.adjacency(ig)
+  evals <- eigen(adj)$value
+  nc  <- log(mean(exp(evals)))
+  nc / (N - log(N))
+}
+nc.attack <- function(ig) {
+  hubord <- order(rank(betweenness(ig)), rank(degree(ig)), decreasing=TRUE)
+  sapply(1:round(vcount(ig)*.8), function(i) {
+    ind <- hubord[1:i]
+    tmp <- delete_vertices(ig, V(ig)$name[ind])
+    natcon(tmp)
+  }) }
+nc<- nc.attack(ig)
+write.csv(nc,"data/stability/NC/Total-nc-aerobic.csv")
+#厌氧组
+a=read.csv("result/network/inap/anaerobic/Galaxy216-[anaerobic_edge_gephi_0.88_RMT_result].csv",
+           header = TRUE)
+a$Source=as.factor(a$Source)
+a$Target=as.factor(a$Target)
+b=a[,c(1,3)]
+b=t(b)
+b=t(b)
+ig=graph_from_edgelist(b,directed=FALSE)#生成了
+natcon <- function(ig) {
+  N   <- vcount(ig)
+  adj <- get.adjacency(ig)
+  evals <- eigen(adj)$value
+  nc  <- log(mean(exp(evals)))
+  nc / (N - log(N))
+}
+nc.attack <- function(ig) {
+  hubord <- order(rank(betweenness(ig)), rank(degree(ig)), decreasing=TRUE)
+  sapply(1:round(vcount(ig)*.8), function(i) {
+    ind <- hubord[1:i]
+    tmp <- delete_vertices(ig, V(ig)$name[ind])
+    natcon(tmp)
+  }) }
+nc<- nc.attack(ig)
+write.csv(nc,"data/stability/NC/Total-nc-anaerobic.csv")
+#波动组
+a=read.csv("result/network/inap/fluctuation/Galaxy239-[Whole_Network_Gephi_Edge_attribute_0.84_RMT_result].csv",
+            header = TRUE)
+a$Source=as.factor(a$Source)
+a$Target=as.factor(a$Target)
+b=a[,c(1,3)]
+b=t(b)
+b=t(b)
+ig=graph_from_edgelist(b,directed=FALSE)#生成了
+natcon <- function(ig) {
+  N   <- vcount(ig)
+  adj <- get.adjacency(ig)
+  evals <- eigen(adj)$value
+  nc  <- log(mean(exp(evals)))
+  nc / (N - log(N))
+}
+nc.attack <- function(ig) {
+  hubord <- order(rank(betweenness(ig)), rank(degree(ig)), decreasing=TRUE)
+  sapply(1:round(vcount(ig)*.8), function(i) {
+    ind <- hubord[1:i]
+    tmp <- delete_vertices(ig, V(ig)$name[ind])
+    natcon(tmp)
+  }) }
+nc<- nc.attack(ig)
+write.csv(nc,"data/stability/NC/Total-nc-fluctuation.csv")
+#plot
+rm(list = ls())
+nc_ae <- read.table("data/stability/NC/Total-nc-aerobic.csv",header = T,sep = ",")
+nc_an <- read.table("data/stability/NC/Total-nc-anaerobic.csv",header = T,sep = ",")
+nc_flu <- read.table("data/stability/NC/Total-nc-fluctuation.csv",header = T,sep = ",")
+nc_ae$node_re_per <- as.numeric(nc_ae$X/max(nc_ae$X)*100)
+nc_ae$robust <- as.numeric(nc_ae$x/nc_ae[1,2]*100)
+nc_ae$Treatment <- as.factor("Aerobic")
+nc_an$node_re_per <- as.numeric(nc_an$X/max(nc_an$X)*100)
+nc_an$robust <- as.numeric(nc_an$x/nc_an[1,2]*100)
+nc_an$Treatment <- as.factor("Anaerobic")
+nc_flu$node_re_per <- as.numeric(nc_flu$X/max(nc_flu$X)*100)
+nc_flu$robust <- as.numeric(nc_flu$x/nc_flu[1,2]*100)
+nc_flu$Treatment <- as.factor("Fluctuation")
+nc <- data.frame(rbind(nc_ae,nc_an,nc_flu))
+write.table(nc,"result/network/stability/Total-nc.csv",sep = ",")
+p <- ggplot(nc, aes(node_re_per,robust,colour=Treatment)) +
+  geom_point(size = 8, alpha = 0.75)+
+  labs(x = "Percent of Node Remove(%)  ", y = "Relative Natural Connectivity(%)") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "bold.italic",colour = "black", size = 16,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.position = "top",
+         legend.text = element_text(size = 8, face = "bold",family="serif"),
+         legend.title = element_text(size = 10, face = "bold",family="serif"),
+         plot.title = element_text(vjust = -6,hjust = 0))+
+  scale_x_continuous(expand = c(0,0))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  geom_smooth()
+p
+p+theme(legend.position = c(0.98, 0.98),
+        legend.justification = c(1,1))
+ggsave("result/network/stability/按degree稳定性对比.pdf",width=10,height=4,units = "in",bg="transparent")
+ggsave("result/network/stability/按degree稳定性对比.tiff",width=10,height=4,units = "in",bg="transparent")
+
+```
+
+
+
+## 结构方程模型
+### figure4dlavaan分析确定因子之间相互作用
+#### 波动组结构方程模型
+```{r}
+count_to_log <- function(x) { return( log10(x+1))}
+physeq.flu.log <- transform_sample_counts(physeq.flu, count_to_log)
+ordinate_flu <- ordinate(physeq.flu.log,method = "MDS",distance = "bray")
+p <- plot_ordination(physeq.flu, ordinate_flu)#获得了1，2轴得分
+p
+flu_rda_pc1 <- p[["data"]][["Axis.1"]] %>% data.frame()
+colnames(flu_rda_pc1) <- "community"
+flu_rda_pc1 <- scale(flu_rda_pc1,scale=T) %>% data.frame()#进行中心标准化
+
+# 计算获得alpha多样性用均一度代表alpha多样性flu_alpha_scale 
+p_alpha <- plot_richness(physeq.flu, color = "Exposue.Time", x = "Exposue.Time",
+                         measures = c("Observed", "Chao1", "Shannon", "InvSimpson"))
+
+p_alpha 
+flu_alpha <- estimate_richness(physeq.flu,
+                              measures = "InvSimpson")
+
+flu_alpha_scale <- scale(flu_alpha,scale = T) %>% data.frame()
+
+# 获得抗性基因变化flu_arg_pcoa1
+# 以抗性基因丰度计算欧式距离
+flu_arg <- as(sample_data(physeq.flu),"data.frame")[,3:6]
+flu_arg_scale <- scale(flu_arg,scale=T)
+flu_arg_dist <- vegdist(flu_arg_scale,method="euclidean")
+flu_arg_pcoa <- cmdscale(flu_arg_dist)#获得了 pcoa I，II轴坐标
+flu_arg_pcoa1 <-flu_arg_pcoa[,1] %>% data.frame() 
+colnames(flu_arg_pcoa1) <- "arg"
+
+# "Biomass","HGT","TC","ORP"，四个因素
+metadata_flu <- as(sample_data(physeq.flu),"data.frame")
+flu_four <- metadata_flu[,c(2,7,9,10)]
+
+flu_four_scale<- scale(flu_four,scale=T) %>% data.frame()
+colnames(flu_four_scale) <- c("Biomass","HGT","TC","ORP")
+
+# 环境因素
+env_flu <- scale(metadata_flu[,c(1,8)],scale=T) %>% data.frame()
+flu_env_dist <- vegdist(env_flu,method="euclidean")
+flu_env_pcoa <- cmdscale(flu_env_dist)[,1] %>% data.frame()
+colnames(flu_env_pcoa) <- "Environment"
+
+flu <- cbind(flu_rda_pc1,flu_alpha_scale,flu_arg_pcoa1,flu_four_scale,flu_env_pcoa)
+
+#构建模型
+# 
+
+model <- '
+    arg ~ community + HGT + TC +InvSimpson +Biomass
+    HGT ~ community + InvSimpson + Biomass +TC
+    Biomass ~ TC + ORP + Environment
+    community ~ TC + ORP + Biomass
+    InvSimpson ~ TC + ORP + Biomass
+    InvSimpson ~~ Biomass + community
+    community ~~Biomass
+'
+fit_flu <- lavaan::sem(model, data =flu)
+parameterEstimates(fit_flu)
+#library(semPlot)
+m <- matrix(c("TC",NA,"InvSimpson",NA,NA,"ORP","Biomass",NA,
+              "HGT","arg","Environment",NA,"community",
+              NA,NA),byrow = TRUE, 3, 5)#确定sem图展示方法
+p_flu <- semPaths(fit_flu, whatLabels = "est",
+                 sizeMan = 10,
+                 edge.label.cex = 1.15,
+                 style = "ram",
+                 nCharNodes = 0, nCharEdges = 0,
+                 layout = m)
+#library(semptools)
+p_flu2 <- mark_se(p_flu, fit_flu,sep = "\n")
+plot(p_flu2)
+p_flu3 <- mark_sig(p_flu2, fit_flu, alpha = c("(n.s.)" = 1.00, "*" = .05,"**"=.01,"***"=0.001))
+plot(p_flu3)
+summary(fit_flu,fit.measures=TRUE)
+
+```
+
+
+#### 好氧组结构方程模型
+```{r}
+count_to_log <- function(x) { return( log10(x+1))}
+physeq.ae.log <- transform_sample_counts(physeq.ae, count_to_log)
+ordinate_ae <- ordinate(physeq.ae.log,method = "MDS",distance = "bray")
+p <- plot_ordination(physeq.ae, ordinate_ae)#获得了1，2轴得分
+p
+ae_rda_pc1 <- p[["data"]][["Axis.1"]] %>% data.frame()
+colnames(ae_rda_pc1) <- "community"
+ae_rda_pc1 <- scale(ae_rda_pc1,scale=T) %>% data.frame()#进行中心标准化
+
+# 计算获得alpha多样性用均一度代表alpha多样性ae_alpha_scale 
+p_alpha <- plot_richness(physeq.ae, color = "Exposue.Time", x = "Exposue.Time",
+                         measures = c("Observed", "Chao1", "Shannon", "InvSimpson"))
+
+p_alpha 
+ae_alpha <- estimate_richness(physeq.ae,
+                              measures = "InvSimpson")
+
+ae_alpha_scale <- scale(ae_alpha,scale = T) %>% data.frame()
+
+# 获得抗性基因变化ae_arg_pcoa1
+# 以抗性基因丰度计算欧式距离
+ae_arg <- as(sample_data(physeq.ae),"data.frame")[,3:6]
+ae_arg_scale <- scale(ae_arg,scale=T)
+ae_arg_dist <- vegdist(ae_arg_scale,method="euclidean")
+ae_arg_pcoa <- cmdscale(ae_arg_dist)#获得了 pcoa I，II轴坐标
+ae_arg_pcoa1 <-ae_arg_pcoa[,1] %>% data.frame() 
+colnames(ae_arg_pcoa1) <- "arg"
+
+# "Biomass","HGT","TC","ORP"，四个因素
+metadata_ae <- as(sample_data(physeq.ae),"data.frame")
+ae_four <- metadata_ae[,c(2,7,9,10)]
+
+ae_four_scale<- scale(ae_four,scale=T) %>% data.frame()
+colnames(ae_four_scale) <- c("Biomass","HGT","TC","ORP")
+
+# 环境因素
+env_ae <- scale(metadata_ae[,c(1,8)],scale=T) %>% data.frame()
+ae_env_dist <- vegdist(env_ae,method="euclidean")
+ae_env_pcoa <- cmdscale(ae_env_dist)[,1] %>% data.frame()
+colnames(ae_env_pcoa) <- "Environment"
+
+ae <- cbind(ae_rda_pc1,ae_alpha_scale,ae_arg_pcoa1,ae_four_scale,ae_env_pcoa)
+
+#构建模型
+# 
+
+model <- '
+    arg ~ community + HGT + TC +InvSimpson +Biomass
+    HGT ~ community + InvSimpson + Biomass +TC
+    Biomass ~ TC + ORP + Environment
+    community ~ TC + ORP + Biomass
+    InvSimpson ~ TC + ORP + Biomass
+    InvSimpson ~~ Biomass + community
+    community ~~Biomass
+'
+fit_ae <- lavaan::sem(model, data =ae)
+parameterEstimates(fit_ae)
+#library(semPlot)
+m <- matrix(c("TC",NA,"InvSimpson",NA,NA,"ORP","Biomass",NA,
+              "HGT","arg","Environment",NA,"community",
+              NA,NA),byrow = TRUE, 3, 5)#确定sem图展示方法
+p_ae <- semPaths(fit_ae, whatLabels = "est",
+                 sizeMan = 10,
+                 edge.label.cex = 1.15,
+                 style = "ram",
+                 nCharNodes = 0, nCharEdges = 0,
+                 layout = m)
+#library(semptools)
+p_ae2 <- mark_se(p_ae, fit_ae,sep = "\n")
+plot(p_ae2)
+p_ae3 <- mark_sig(p_ae2, fit_ae, alpha = c("(n.s.)" = 1.00, "*" = .05,"**"=.01,"***"=0.001))
+plot(p_ae3)
+summary(fit_ae,fit.measures=TRUE)
+
+```
+
+
+#### 厌氧组结构方程模型
+## 群落组装
+### 样本间最小进化距离
+#### figure4a
+不同来源样本在时间间隔上的进化距离
+```{r}
+ae_bMNTD_OTU <- read.csv("./result/assemble/otu_βmntd_weighted_ae.csv",row.names = 1) %>% data.frame()
+an_bMNTD_OTU <- read.csv("./result/assemble/otu_βmntd_weighted_an.csv",row.names = 1) %>% data.frame()
+flu_bMNTD_OTU <-read.csv("./result/assemble/otu_βmntd_weighted_flu.csv",row.names = 1) %>% data.frame()
+#获得不同时间点样本间的进化距离
+#好氧组
+ae6 <- character(5)  # 为5行的空向量
+ae12 <- character(5)
+ae18 <- character(5)
+ae24 <- character(5)
+ae30 <- character(5)
+for (i in 1:5) {
+  ae6[i] <- paste("O_D6_", i, sep = "")
+  ae12[i] <- paste("O_D12_", i, sep = "")
+  ae18[i] <- paste("O_D18_", i, sep = "")
+  ae24[i] <- paste("O_D24_", i, sep = "")
+  ae30[i] <- paste("O_D30_", i, sep = "")
+}
+ae6_βMNTD<- subset(ae_bMNTD_OTU, select=ae6, !row.names(ae_bMNTD_OTU) %in% ae6) %>% melt()
+ae12_βMNTD <- subset(ae_bMNTD_OTU, select=ae12, row.names(ae_bMNTD_OTU) %in% c(ae18,ae24,ae30))%>% melt()
+ae18_βMNTD <- subset(ae_bMNTD_OTU, select=ae18, row.names(ae_bMNTD_OTU) %in% c(ae24,ae30))%>% melt()
+ae24_βMNTD <- subset(ae_bMNTD_OTU, select=ae24, row.names(ae_bMNTD_OTU) %in% ae30)%>% melt()
+ae_βMNTD <- rbind(ae6_βMNTD,ae12_βMNTD,ae18_βMNTD,ae24_βMNTD)
+dim(ae_βMNTD)
+colnames(ae_βMNTD) <- c("Treatment","βMNTD")
+ae_βMNTD$Treatment <- "Aerobic"
+#厌氧组
+an6 <- character(5)  # 为5行的空向量
+an12 <- character(5)
+an18 <- character(5)
+an24 <- character(5)
+an30 <- character(5)
+for (i in 1:5) {
+  an6[i] <- paste("N_D6_", i, sep = "")
+  an12[i] <- paste("N_D12_", i, sep = "")
+  an18[i] <- paste("N_D18_", i, sep = "")
+  an24[i] <- paste("N_D24_", i, sep = "")
+  an30[i] <- paste("N_D30_", i, sep = "")
+}
+an6_βMNTD<- subset(an_bMNTD_OTU, select=an6, !row.names(an_bMNTD_OTU) %in% an6) %>% melt()
+an12_βMNTD <- subset(an_bMNTD_OTU, select=an12, row.names(an_bMNTD_OTU) %in% c(an18,an24,an30))%>% melt()
+an18_βMNTD <- subset(an_bMNTD_OTU, select=an18, row.names(an_bMNTD_OTU) %in% c(an24,an30))%>% melt()
+an24_βMNTD <- subset(an_bMNTD_OTU, select=an24, row.names(an_bMNTD_OTU) %in% an30)%>% melt()
+an_βMNTD <- rbind(an6_βMNTD,an12_βMNTD,an18_βMNTD,an24_βMNTD)
+dim(an_βMNTD)# 应为250，2
+colnames(an_βMNTD) <- c("Treatment","βMNTD")
+an_βMNTD$Treatment <- "Anaerobic"
+#波动组
+flu6 <- character(5)  # 为5行的空向量
+flu12 <- character(5)
+flu18 <- character(5)
+flu24 <- character(5)
+flu30 <- character(5)
+for (i in 1:5) {
+  flu6[i] <- paste("NO_D6_", i, sep = "")
+  flu12[i] <- paste("NO_D12_", i, sep = "")
+  flu18[i] <- paste("NO_D18_", i, sep = "")
+  flu24[i] <- paste("NO_D24_", i, sep = "")
+  flu30[i] <- paste("NO_D30_", i, sep = "")
+}
+flu6_βMNTD<- subset(flu_bMNTD_OTU, select=flu6, !row.names(flu_bMNTD_OTU) %in% flu6) %>% melt()
+flu12_βMNTD <- subset(flu_bMNTD_OTU, select=flu12, row.names(flu_bMNTD_OTU) %in% c(flu18,flu24,flu30))%>% melt()
+flu18_βMNTD <- subset(flu_bMNTD_OTU, select=flu18, row.names(flu_bMNTD_OTU) %in% c(flu24,flu30))%>% melt()
+flu24_βMNTD <- subset(flu_bMNTD_OTU, select=flu24, row.names(flu_bMNTD_OTU) %in% flu30)%>% melt()
+flu_βMNTD <- rbind(flu6_βMNTD,flu12_βMNTD,flu18_βMNTD,flu24_βMNTD)
+dim(flu_βMNTD)
+colnames(flu_βMNTD) <- c("Treatment","βMNTD")
+flu_βMNTD$Treatment <- "Fluctuation"
+#合并数据进行差异比较出图
+βMNTD_all <- rbind(flu_βMNTD,an_βMNTD,ae_βMNTD)
+βMNTD_all$Treatment <- factor(βMNTD_all$Treatment,levels = c("Aerobic","Anaerobic","Fluctuation"))
+βMNTD_sta <- βMNTD_all %>% group_by(Treatment) %>% summarise(
+  mean_βMNTD = mean(βMNTD),
+  sd_βMNTD  = sd(βMNTD),
+  max_βMNTD =max(βMNTD),
+  min_βMNTD =min(βMNTD)
+)
+βMNTD_sta
+fit <- aov(βMNTD ~ Treatment, data = βMNTD_all)
+summary(fit)
+TukeyHSD(fit)
+p <- ggplot(βMNTD_all, aes(x = Treatment, y = βMNTD, fill=Treatment)) +
+  geom_boxplot(size=2,aes(fill = Treatment,colour= Treatment),alpha=0.5,outlier.color = "NA", outlier.shape = NA) +
+  geom_jitter(width=0.3, height=0, alpha=0.8, size=6, aes(colour = Treatment))+
+  labs(y="βMNTD From Different Time")+
+  theme_test()+theme(plot.title=element_text(hjust=0.5,size=16,face="bold", family="serif"),
+                     axis.text=element_text(size=13,face="bold", family="serif",colour = "black"),
+                     axis.title.x=element_text(size=16, family="serif",face = "bold"),
+                     axis.title.y=element_text(size=16, family="serif",face = "bold"),
+                     panel.background = element_rect(fill = "transparent"), # bg of the panel
+                     plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+                     panel.grid.major = element_blank(), # get rid of major grid
+                     panel.grid.minor = element_blank(), # get rid of minor grid
+                     legend.position = "none")+
+  scale_fill_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))
+p
+p+geom_signif(comparisons = list(c("Aerobic", "Anaerobic"),
+                                 c("Anaerobic", "Fluctuation"),
+                                 c("Aerobic", "Fluctuation")),
+              map_signif_level=TRUE,y_position=c(0.0065, 0.0075, 0.0070),size = 0.8,textsize = 5,family="serif")+
+  theme(panel.border = element_rect(size = 1, fill = NA, color = "black"),axis.ticks = element_line(size = 1),
+        axis.ticks.length.x = unit(-0.15, "cm"))
+ggsave("result/assemble/figure4a.pdf",width=4.67,height=4.22,units = "in",bg="transparent")
+ggsave("result/assemble/figure4a.tiff",width=6.49,height=5,units = "in",bg="transparent")
+
+
+```
+
+#### figure4b 
+otu水平样本间距离与抗生素关系
+```{r}
+ae_bMNTD_OTU <- read.csv("./result/assemble/otu_βmntd_weighted_ae.csv",row.names = 1) %>% data.frame()
+an_bMNTD_OTU <- read.csv("./result/assemble/otu_βmntd_weighted_an.csv",row.names = 1) %>% data.frame()
+flu_bMNTD_OTU <-read.csv("./result/assemble/otu_βmntd_weighted_flu.csv",row.names = 1) %>% data.frame()
+#计算抗生素浓度变化的距离
+# 好氧组
+anti_ae <- as(sample_data(physeq.ae),"data.frame")$antibiotics %>% data.frame()#获得抗生素浓度变化心化
+dist_anti_ae <- dist(anti_ae, method = 'euclidean')
+#将mntd矩阵转化为向量
+dist_mntd_ae <- ae_bMNTD_OTU[lower.tri(ae_bMNTD_OTU, diag = FALSE)]
+#计算抗生素和样本间进化距离的相关性
+m_anti_ae <- mantel(ae_bMNTD_OTU, dist_anti_ae, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_ae
+#r=0.4622 p=1e-04
+dist_anti_ae_v <- as.vector(dist_anti_ae)
+dist_anti_ae_v <- (dist_anti_ae_v - min(dist_anti_ae_v)) / (max(dist_anti_ae_v) - min(dist_anti_ae_v))
+mat.ae <- data.frame(dist_mntd_ae,dist_anti_ae_v)
+mat.ae$Treatment <- "Aerobic"
+colnames(mat.ae) <- c("beta_MNTD","Antibiotics","Treatment")
+# 厌氧组
+anti_an <- as(sample_data(physeq.an),"data.frame")$antibiotics %>% data.frame()#获得抗生素浓度变化
+dist_anti_an <- dist(anti_an, method = 'euclidean')
+#将mntd矩阵转化为向量
+dist_mntd_an <- an_bMNTD_OTU[lower.tri(an_bMNTD_OTU, diag = FALSE)]
+#计算抗生素和样本间进化距离的相关性
+m_anti_an <- mantel(an_bMNTD_OTU, dist_anti_an, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_an
+#r=0.0.005479  p=0.4394
+dist_anti_an_v <- as.vector(dist_anti_an)
+dist_anti_an_v <- (dist_anti_an_v- min(dist_anti_an_v)) / (max(dist_anti_an_v) - min(dist_anti_an_v))
+mat.an <- data.frame(dist_mntd_an,dist_anti_an_v)
+mat.an$Treatment <- "Anaerobic"
+colnames(mat.an) <- c("beta_MNTD","Antibiotics","Treatment")
+
+
+# 波动组
+anti_flu <- as(sample_data(physeq.flu),"data.frame")$antibiotics %>% data.frame()#获得抗生素浓度变化
+anti_flu_scale  <- scale(anti_flu, center = TRUE, scale = TRUE) %>% data.frame()#中心化
+dist_anti_flu <- dist(anti_flu, method = 'euclidean')
+#将mntd矩阵转化为向量
+dist_mntd_flu <- flu_bMNTD_OTU[lower.tri(flu_bMNTD_OTU, diag = FALSE)]
+#计算抗生素和样本间进化距离的相关性
+m_anti_flu <- mantel(flu_bMNTD_OTU, dist_anti_flu, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_flu
+#r=0.3793 4e-04
+dist_anti_flu_v <- as.vector(dist_anti_flu)
+dist_anti_flu_v<- (dist_anti_flu_v- min(dist_anti_flu_v)) / (max(dist_anti_flu_v) - min(dist_anti_flu_v))
+mat.flu <- data.frame(dist_mntd_flu,dist_anti_flu_v)
+mat.flu$Treatment <- "Fluctuation"
+colnames(mat.flu) <- c("beta_MNTD","Antibiotics","Treatment")
+mat <- rbind(mat.ae,mat.an,mat.flu) %>% data.frame()
+p <- ggplot(mat, aes(y = beta_MNTD , x = Antibiotics, colour = Treatment, fill= Treatment)) + 
+  geom_point(size = 4, alpha = 0.75,shape = 21) + 
+  geom_smooth(alpha = 0.5) + 
+  labs(x = "Difference in TC concentration ", y = "Beta-Mean nearest taxon distance(β-MNTD)") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "italic",colour = "black", size = 8,family="serif"),
+         panel.border = element_rect(size = 1, fill = NA, color = "black"),axis.ticks = element_line(size = 1),
+         axis.ticks.length.x = unit(-0.15, "cm"),
+         legend.text = element_text(size = 12, face = "bold",family="serif"),
+         legend.title = element_text(size = 14, face = "bold")) +
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  scale_x_continuous(expand = c(-0,0))
+p1 <- p+scale_fill_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  theme(legend.position = c(0.78, 0.98),
+        legend.justification = c(1,1),
+        legend.background = element_rect(fill = "transparent"))
+p1
+ggsave("result/assemble/figure4b.pdf",width=11.25,height=4.5,units = "in",bg="transparent")
+ggsave("result/assemble/figure4b.tiff",width=11.25,height=4.5,units = "in",bg="transparent")
+```
+
+```{r}
+#### 好氧组群落间的最近进化距离 ####
+rm(list=ls())
+load("physeq.RData")
+physeq.ae1 <- subset_samples(physeq,Treatment=="Aerobic")#获取厌氧组otu表格
+physeq.ae2 <- rarefy_even_depth(physeq.ae1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.ae2, test_function, A = 2)#至少在两个样本中大于2
+physeq.ae3<-prune_taxa(taxa.to.keep, physeq.ae2)#按筛选条件进行过滤 留下2904个otu
+
+# 准备计算群落间最小进化距离
+otu_ae <- as(otu_table(physeq.ae3),"matrix") %>% data.frame()
+phylo_ae <- phy_tree(physeq.ae3)
+phylo_otu_ae = match.phylo.data(phylo_ae, otu_ae);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_ae = as.matrix(comdistnt(t(phylo_otu_ae$data),cophenetic(phylo_otu_ae$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_ae
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_ae$data),colnames(beta.mntd.weighted_ae)); # just a check, should be TRUE
+identical(colnames(phylo_otu_ae$data),rownames(beta.mntd.weighted_ae)); # just a check, should be TRUE
+write.csv(beta.mntd.weighted_ae,"./result/assemble/otu_βmntd_weighted_ae.csv",quote = F)
+
+#### 计算厌氧组样本间进化距离 ####
+physeq.an1 <- subset_samples(physeq,Treatment=="Anaerobic")#获取厌氧组otu表格
+physeq.an2 <- rarefy_even_depth(physeq.an1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.an2, test_function, A = 2)#至少在两个样本中大于2
+physeq.an3<-prune_taxa(taxa.to.keep, physeq.an2)#按筛选条件进行过滤 留下2904个otu
+
+# 准备计算群落间最小进化距离
+otu_an <- as(otu_table(physeq.an3),"matrix") %>% data.frame()
+phylo_an <- phy_tree(physeq.an3)
+phylo_otu_an = match.phylo.data(phylo_an, otu_an);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_an = as.matrix(comdistnt(t(phylo_otu_an$data),cophenetic(phylo_otu_an$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_an
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_an$data),colnames(beta.mntd.weighted_an)); # just a check, should be TRUE
+identical(colnames(phylo_otu_an$data),rownames(beta.mntd.weighted_an)); # just a check, should be TRUE
+write.csv(beta.mntd.weighted_an,"./result/assemble/otu_βmntd_weighted_an.csv",quote = F)
+
+
+#### 计算波动组样本间进化距离 ####
+physeq.flu1 <- subset_samples(physeq,Treatment=="Fluctuation")#获取厌氧组otu表格
+physeq.flu2 <- rarefy_even_depth(physeq.flu1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.flu2, test_function, A = 13)#至少在两个样本中大于2
+physeq.flu3<-prune_taxa(taxa.to.keep, physeq.flu2)#按筛选条件进行过滤 留下1160个otu
+
+# 准备计算群落间最小进化距离
+otu_flu <- as(otu_table(physeq.flu3),"matrix") %>% data.frame()
+phylo_flu <- phy_tree(physeq.flu3)
+phylo_otu_flu = match.phylo.data(phylo_flu, otu_flu);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_flu = as.matrix(comdistnt(t(phylo_otu_flu$data),cophenetic(phylo_otu_flu$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_flu
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_flu$data),colnames(beta.mntd.weighted_flu)); # just a check, should be TRUE
+identical(colnames(phylo_otu_flu$data),rownames(beta.mntd.weighted_flu)); # just a check, should be TRUE
+write.csv(beta.mntd.weighted_flu,"./result/assemble/otu_βmntd_weighted_flu.csv",quote = F)
+#### 波动组进行log转化
+count_to_log <- function(x) { return( log10(x+1))}
+physeq.flu3_log <- transformSampleCounts(physeq.flu3,count_to_log)
+otu_flu_log <- as(otu_table(physeq.flu3_log),"matrix") %>% data.frame()
+phylo_flu_log <- phy_tree(physeq.flu3_log)
+phylo_otu_flu_log = match.phylo.data(phylo_flu_log, otu_flu_log);
+beta.mntd.weighted_flu_log = as.matrix(comdistnt(t(phylo_otu_flu_log$data),cophenetic(phylo_otu_flu_log$phy),abundance.weighted=T));
+write.csv(beta.mntd.weighted_flu_log,"./result/assemble/otu_βmntd_weighted_flu_log.csv",quote = F)
+#### 最近进化距离变化与抗生素浓度变化可以说明抗生素对群落谱系关系的影响####
+# 好氧组抗生素距离与样本间谱系距离关系
+# 目标对beta.mntd.weighted_ae 和抗生素变化做相关性分析
+anti_ae <- as(sample_data(physeq.ae),"data.frame")$antibiotics %>% data.frame()#获得抗生素浓度变化
+anti_ae_scale  <- scale(anti_ae, center = TRUE, scale = TRUE) %>% data.frame()#中心化
+dist_anti_ae <- dist(anti_ae, method = 'euclidean')
+#将mntd矩阵转化为向量
+dist_mntd_ae <- beta.mntd.weighted_ae[lower.tri(beta.mntd.weighted_ae, diag = FALSE)]
+#计算抗生素和样本间进化距离的相关性
+m_anti_ae <- mantel(beta.mntd.weighted_ae, dist_anti_ae, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_ae
+#r=0.4622 p=1e-04
+dist_anti_ae_v <- as.vector(dist_anti_ae)
+mat.ae <- data.frame(dist_mntd_ae,dist_anti_ae_v)
+mat.ae$Treatment <- "Aerobic"
+colnames(mat.ae) <- c("beta_MNTD","Antibiotics","Treatment")
+
+
+# 厌氧组抗生素距离与谱系距离的关系
+anti_an <- as(sample_data(physeq.an),"data.frame")$antibiotics %>% data.frame()#获得抗生素浓度变化
+anti_an_scale  <- scale(anti_an, center = TRUE, scale = TRUE) %>% data.frame()#中心化
+dist_anti_an <- dist(anti_an, method = 'euclidean')
+#将mntd矩阵转化为向量
+dist_mntd_an <- beta.mntd.weighted_an[lower.tri(beta.mntd.weighted_an, diag = FALSE)]
+#计算抗生素和样本间进化距离的相关性
+m_anti_an <- mantel(beta.mntd.weighted_an, dist_anti_an, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_an
+#r=0.0.005479  p=0.4394
+dist_anti_an_v <- as.vector(dist_anti_an)
+mat.an <- data.frame(dist_mntd_an,dist_anti_an_v)
+mat.an$Treatment <- "Anaerobic"
+colnames(mat.an) <- c("beta_MNTD","Antibiotics","Treatment")
+
+
+# 波动组抗生素与谱系距离的关系
+anti_flu <- as(sample_data(physeq.flu),"data.frame")$antibiotics %>% data.frame()#获得抗生素浓度变化
+anti_flu_scale  <- scale(anti_flu, center = TRUE, scale = TRUE) %>% data.frame()#中心化
+dist_anti_flu <- dist(anti_flu, method = 'euclidean')
+#将mntd矩阵转化为向量
+dist_mntd_flu <- beta.mntd.weighted_flu[lower.tri(beta.mntd.weighted_flu, diag = FALSE)]
+#计算抗生素和样本间进化距离的相关性
+m_anti_flu <- mantel(beta.mntd.weighted_flu, dist_anti_flu, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_flu
+#r=0.3793 4e-04
+dist_anti_flu_v <- as.vector(dist_anti_flu)
+mat.flu <- data.frame(dist_mntd_flu,dist_anti_flu_v)
+mat.flu$Treatment <- "Fluctuation"
+colnames(mat.flu) <- c("beta_MNTD","Antibiotics","Treatment")
+
+#### plot进化距离和抗生素关系 ####
+mat <- rbind(mat.ae,mat.an,mat.flu) %>% data.frame()
+p <- ggplot(mat, aes(y = beta_MNTD , x = Antibiotics, colour = Treatment, fill= Treatment)) + 
+  geom_point(size = 4, alpha = 0.75,shape = 21) + 
+  geom_smooth(method = "lm", alpha = 0.5) + 
+  labs(x = "Difference in TC concentration(%) ", y = "Beta-Mean nearest taxon distance(β-MNTD)") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "italic",colour = "black", size = 8,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.text = element_text(size = 10, face = "bold",family="serif"),
+         legend.title = element_text(size = 11, face = "bold")) +
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  scale_x_continuous(expand = c(-0,0))
+p1 <- p+scale_fill_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  theme(legend.position = c(0.78, 0.98),
+        legend.justification = c(1,1),
+        legend.background = element_rect(fill = "transparent"))
+p1
+#ggsave("result/assemble/抗生素对群落进化距离.pdf",width=10,height=4,units = "in",bg="transparent")
+#ggsave("result/assemble/抗生素对群落进化距离.tiff",width=10,height=4,units = "in",bg="transparent")
+
+```
+### 获得family和order水平的phylo文件
+```{r}
+physeq.ae1 <- subset_samples(physeq,Treatment=="Aerobic")
+phuseq.ae2 <- rarefy_even_depth(physeq.ae1,rngseed = 800)
+physeq.ae2 <- rarefy_even_depth(physeq.ae1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.ae2, test_function, A = 2)#至少在两个样本中大于2
+physeq.ae3<-prune_taxa(taxa.to.keep, physeq.ae2)#按筛选条件进行过滤
+
+physeq.an1 <- subset_samples(physeq,Treatment=="Anaerobic")#获取厌氧组otu表格
+physeq.an2 <- rarefy_even_depth(physeq.an1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.an2, test_function, A = 2)#至少在两个样本中大于2
+physeq.an3<-prune_taxa(taxa.to.keep, physeq.an2)#按筛选条件进行过滤 留下2904个otu
+
+
+physeq.flu1 <- subset_samples(physeq,Treatment=="Fluctuation")#获取厌氧组otu表格
+physeq.flu2 <- rarefy_even_depth(physeq.flu1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.flu2, test_function, A = 2)#至少在两个样本中大于2
+physeq.flu3<-prune_taxa(taxa.to.keep, physeq.flu2)#按筛选条件进行过滤 留下2904个otu
+
+
+count_to_log <- function(x) { return( log10(x+1))}
+physeq_ae3_family <- tax_glom(physeq.ae3, taxrank="Family")
+physeq_ae3_family_log <- transform_sample_counts(physeq_ae3_family, count_to_log)
+physeq_ae3_order <- tax_glom(physeq.ae3, taxrank="Order")
+physeq_ae3_order_log <- transform_sample_counts(physeq_ae3_order, count_to_log)
+otu_ae_family_log <- as(otu_table(physeq_ae3_family_log),"matrix") %>% data.frame()
+phylo_ae_family_log <- phy_tree(physeq_ae3_family_log)
+phylo_otu_ae_family_log = match.phylo.data(phylo_ae_family_log, otu_ae_family_log);
+otu_ae_order_log <- as(otu_table(physeq_ae3_order_log),"matrix") %>% data.frame()
+phylo_ae_order_log <- phy_tree(physeq_ae3_order_log)
+phylo_otu_ae_order_log = match.phylo.data(phylo_ae_order_log, otu_ae_order_log);
+
+physeq_an3_family <- tax_glom(physeq.an3, taxrank="Family")
+physeq_an3_order <- tax_glom(physeq.an3, taxrank="Order")
+physeq_an3_family_log <- transform_sample_counts(physeq_an3_family, count_to_log)
+physeq_an3_order_log <- transform_sample_counts(physeq_an3_order, count_to_log)
+otu_an_family <- as(otu_table(physeq_an3_family),"matrix") %>% data.frame()
+phylo_an_family <- phy_tree(physeq_an3_family)
+phylo_otu_an_family = match.phylo.data(phylo_an_family, otu_an_family);
+otu_an_order <- as(otu_table(physeq_an3_order),"matrix") %>% data.frame()
+phylo_an_order <- phy_tree(physeq_an3_order)
+phylo_otu_an_order = match.phylo.data(phylo_an_order, otu_an_order);
+
+physeq_flu3_family <- tax_glom(physeq.flu3, taxrank="Family")
+physeq_flu3_order <- tax_glom(physeq.flu3, taxrank="Order")
+physeq_flu3_family_log <- transform_sample_counts(physeq_flu3_family, count_to_log)
+physeq_flu3_order_log <- transform_sample_counts(physeq_flu3_order, count_to_log)
+otu_flu_family <- as(otu_table(physeq_flu3_family),"matrix") %>% data.frame()
+phylo_flu_family <- phy_tree(physeq_flu3_family)
+phylo_otu_flu_family = match.phylo.data(phylo_flu_family, otu_flu_family);
+otu_flu_order <- as(otu_table(physeq_flu3_order),"matrix") %>% data.frame()
+phylo_flu_order <- phy_tree(physeq_flu3_order)
+phylo_otu_flu_order = match.phylo.data(phylo_flu_order, otu_flu_order);
+
+```
+
+#### otu水平距离与抗生素的关系
+```{r}
+#### 好氧组群落间的最近进化距离 ####
+rm(list=ls())
+load("physeq.RData")
+physeq.ae1 <- subset_samples(physeq,Treatment=="Aerobic")#获取厌氧组otu表格
+physeq.ae2 <- rarefy_even_depth(physeq.ae1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.ae2, test_function, A = 2)#至少在两个样本中大于2
+physeq.ae3<-prune_taxa(taxa.to.keep, physeq.ae2)#按筛选条件进行过滤 留下2904个otu
+
+# 准备计算群落间最小进化距离
+otu_ae <- as(otu_table(physeq.ae3),"matrix") %>% data.frame()
+phylo_ae <- phy_tree(physeq.ae3)
+phylo_otu_ae = match.phylo.data(phylo_ae, otu_ae);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_ae = as.matrix(comdistnt(t(phylo_otu_ae$data),cophenetic(phylo_otu_ae$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_ae
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_ae$data),colnames(beta.mntd.weighted_ae)); # just a check, should be TRUE
+identical(colnames(phylo_otu_ae$data),rownames(beta.mntd.weighted_ae)); # just a check, should be TRUE
+
+
+#### 计算厌氧组样本间进化距离 ####
+physeq.an1 <- subset_samples(physeq,Treatment=="Anaerobic")#获取厌氧组otu表格
+physeq.an2 <- rarefy_even_depth(physeq.an1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.an2, test_function, A = 2)#至少在两个样本中大于2
+physeq.an3<-prune_taxa(taxa.to.keep, physeq.an2)#按筛选条件进行过滤 留下2904个otu
+
+# 准备计算群落间最小进化距离
+otu_an <- as(otu_table(physeq.an3),"matrix") %>% data.frame()
+phylo_an <- phy_tree(physeq.an3)
+phylo_otu_an = match.phylo.data(phylo_an, otu_an);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_an = as.matrix(comdistnt(t(phylo_otu_an$data),cophenetic(phylo_otu_an$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_an
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_an$data),colnames(beta.mntd.weighted_an)); # just a check, should be TRUE
+identical(colnames(phylo_otu_an$data),rownames(beta.mntd.weighted_an)); # just a check, should be TRUE
+
+
+
+#### 计算波动组样本间进化距离 ####
+physeq.flu1 <- subset_samples(physeq,Treatment=="Fluctuation")#获取厌氧组otu表格
+physeq.flu2 <- rarefy_even_depth(physeq.flu1,rngseed = 800)#按最小样本量进行抽平
+test_function <- function(x) { x >= 2 }#设置函数reads>2的条件进行筛选
+taxa.to.keep <- genefilter_sample(physeq.flu2, test_function, A = 2)#至少在两个样本中大于2
+physeq.flu3<-prune_taxa(taxa.to.keep, physeq.flu2)#按筛选条件进行过滤 留下2904个otu
+
+# 准备计算群落间最小进化距离
+otu_flu <- as(otu_table(physeq.flu3),"matrix") %>% data.frame()
+phylo_flu <- phy_tree(physeq.flu3)
+phylo_otu_flu = match.phylo.data(phylo_flu, otu_flu);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_flu = as.matrix(comdistnt(t(phylo_otu_flu$data),cophenetic(phylo_otu_flu$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_flu
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_flu$data),colnames(beta.mntd.weighted_flu)); # just a check, should be TRUE
+identical(colnames(phylo_otu_flu$data),rownames(beta.mntd.weighted_flu)); # just a check, should be TRUE
+```
+#### family水平进化距离
+```{r}
+#好氧组
+beta.mntd.weighted_ae_family = as.matrix(comdistnt(t(phylo_otu_ae_family$data),cophenetic(phylo_otu_ae_family$phy),abundance.weighted=T));
+beta.mntd.weighted_ae_family
+beta.mntd.weighted_ae_family_log = as.matrix(comdistnt(t(phylo_otu_ae_family_log$data),cophenetic(phylo_otu_ae_family_log$phy),abundance.weighted=T));
+m_anti_ae_famliy <- mantel(beta.mntd.weighted_ae_family, dist_anti_ae, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_ae_famliy
+m_anti_ae_family_log <- mantel(beta.mntd.weighted_ae_family_log, dist_anti_ae, method = 'spearman', permutations = 9999, na.rm = TRUE)
+#厌氧组
+beta.mntd.weighted_an_family = as.matrix(comdistnt(t(phylo_otu_an_family$data),cophenetic(phylo_otu_an_family$phy),abundance.weighted=T));
+beta.mntd.weighted_an_family
+beta.mntd.weighted_an_family_log = as.matrix(comdistnt(t(phylo_otu_an_family_log$data),cophenetic(phylo_otu_an_family_log$phy),abundance.weighted=T));
+m_anti_an_famliy <- mantel(beta.mntd.weighted_an_family, dist_anti_an, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_an_famliy
+m_anti_an_family_log <- mantel(beta.mntd.weighted_an_family_log, dist_anti_an, method = 'spearman', permutations = 9999, na.rm = TRUE)
+#波动组
+beta.mntd.weighted_flu_family = as.matrix(comdistnt(t(phylo_otu_flu_family$data),cophenetic(phylo_otu_flu_family$phy),abundance.weighted=T));
+beta.mntd.weighted_flu_family
+write.csv(beta.mntd.weighted_flu_family,"./result/assemble/family_βmntd_weighted_flu.csv",quote = F)
+beta.mntd.weighted_flu_family_log = as.matrix(comdistnt(t(phylo_otu_flu_family_log$data),cophenetic(phylo_otu_flu_family_log$phy),abundance.weighted=T));
+m_anti_flu_famliy <- mantel(beta.mntd.weighted_flu_family, dist_anti_flu, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_flu_famliy
+m_anti_flu_family_log <- mantel(beta.mntd.weighted_flu_family_log, dist_anti_flu, method = 'spearman', permutations = 9999, na.rm = TRUE)
+```
+
+#### order水平进化距离与抗生素关系
+
+```{r}
+#oder水平
+#好氧组
+otu_ae_order <- as(otu_table(physeq_ae3_order),"matrix") %>% data.frame()
+phylo_ae_order <- phy_tree(physeq_ae3_order)
+phylo_otu_ae_order = match.phylo.data(phylo_ae_order, otu_ae_order);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_ae_order = as.matrix(comdistnt(t(phylo_otu_ae_order$data),cophenetic(phylo_otu_ae_order$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_ae_order
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_ae_order$data),colnames(beta.mntd.weighted_ae_order)); # just a check, should be TRUE
+identical(colnames(phylo_otu_ae_order$data),rownames(beta.mntd.weighted_ae_order)); # just a check, should be TRUE
+
+otu_ae_order_log <- as(otu_table(physeq_ae3_order_log),"matrix") %>% data.frame()
+phylo_ae_order_log <- phy_tree(physeq_ae3_order_log)
+phylo_otu_ae_order_log = match.phylo.data(phylo_ae_order_log, otu_ae_order_log);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_ae_order_log = as.matrix(comdistnt(t(phylo_otu_ae_order_log$data),cophenetic(phylo_otu_ae_order_log$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_ae_order_log
+#对结果进行验证,结果的横轴都为ture
+identical(colnames(phylo_otu_ae_order_log$data),colnames(beta.mntd.weighted_ae_order_log)); # just a check, should be TRUE
+identical(colnames(phylo_otu_ae_order_log$data),rownames(beta.mntd.weighted_ae_order_log)); # just a check, should be TRUE
+#计算抗生素贡献
+#好氧组 非log
+m_anti_ae_order <- mantel(beta.mntd.weighted_ae_order, dist_anti_ae, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_ae_order
+#Mantel statistic r: 0.1693 Significance: 0.0187
+#好氧组 log
+m_anti_ae_order_log <- mantel(beta.mntd.weighted_ae_order_log, dist_anti_ae, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_ae_order_log
+#statistic r: 0.13  Significance: 0.0528 
+#厌氧组
+otu_an_order <- as(otu_table(physeq_an3_order),"matrix") %>% data.frame()
+phylo_an_order <- phy_tree(physeq_an3_order)
+phylo_otu_an_order = match.phylo.data(phylo_an_order, otu_an_order);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_an_order = as.matrix(comdistnt(t(phylo_otu_an_order$data),cophenetic(phylo_otu_an_order$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_an_order
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_an_order$data),colnames(beta.mntd.weighted_an_order)); # just a check, should be TRUE
+identical(colnames(phylo_otu_an_order$data),rownames(beta.mntd.weighted_an_order)); # just a check, should be TRUE
+
+otu_an_order_log <- as(otu_table(physeq_an3_order_log),"matrix") %>% data.frame()
+phylo_an_order_log <- phy_tree(physeq_an3_order_log)
+phylo_otu_an_order_log = match.phylo.data(phylo_an_order_log, otu_an_order_log);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_an_order_log = as.matrix(comdistnt(t(phylo_otu_an_order_log$data),cophenetic(phylo_otu_an_order_log$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_an_order_log
+#对结果进行验证,结果的横轴都为ture
+identical(colnames(phylo_otu_an_order_log$data),colnames(beta.mntd.weighted_an_order_log)); # just a check, should be TRUE
+identical(colnames(phylo_otu_an_order_log$data),rownames(beta.mntd.weighted_an_order_log)); # just a check, should be TRUE
+#计算抗生素贡献
+#好氧组 非log
+m_anti_an_order <- mantel(beta.mntd.weighted_an_order, dist_anti_an, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_an_order
+#Mantel statistic r: -0.008637  Significance: 0.5187
+#好氧组 log
+m_anti_an_order_log <- mantel(beta.mntd.weighted_an_order_log, dist_anti_an, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_an_order_log
+#statistic r: -0.05867  Significance: 0.7292
+#波动组
+otu_flu_order <- as(otu_table(physeq_flu3_order),"matrix") %>% data.frame()
+phylo_flu_order <- phy_tree(physeq_flu3_order)
+phylo_otu_flu_order = match.phylo.data(phylo_flu_order, otu_flu_order);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_flu_order = as.matrix(comdistnt(t(phylo_otu_flu_order$data),cophenetic(phylo_otu_flu_order$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_flu_order
+#对结果进行验证,结果的横轴都为样本
+identical(colnames(phylo_otu_flu_order$data),colnames(beta.mntd.weighted_flu_order)); # just a check, should be TRUE
+identical(colnames(phylo_otu_flu_order$data),rownames(beta.mntd.weighted_flu_order)); # just a check, should be TRUE
+
+otu_flu_order_log <- as(otu_table(physeq_flu3_order_log),"matrix") %>% data.frame()
+phylo_flu_order_log <- phy_tree(physeq_flu3_order_log)
+phylo_otu_flu_order_log = match.phylo.data(phylo_flu_order_log, otu_flu_order_log);
+#在用match对齐时，会把com表格进行转置，因此在计算是需要重新转置
+beta.mntd.weighted_flu_order_log = as.matrix(comdistnt(t(phylo_otu_flu_order_log$data),cophenetic(phylo_otu_flu_order_log$phy),abundance.weighted=T));
+#获得考虑物种丰度的群落间平均最近进化距离
+beta.mntd.weighted_flu_order_log
+#对结果进行验证,结果的横轴都为ture
+identical(colnames(phylo_otu_flu_order_log$data),colnames(beta.mntd.weighted_flu_order_log)); # just a check, should be TRUE
+identical(colnames(phylo_otu_flu_order_log$data),rownames(beta.mntd.weighted_flu_order_log)); # just a check, should be TRUE
+#计算抗生素贡献
+#好氧组 非log
+m_anti_flu_order <- mantel(beta.mntd.weighted_flu_order, dist_anti_flu, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_flu_order
+#Mantel statistic r: 0.3306 Significance: 0.0013
+#好氧组 log
+m_anti_flu_order_log <- mantel(beta.mntd.weighted_flu_order_log, dist_anti_flu, method = 'spearman', permutations = 9999, na.rm = TRUE)
+m_anti_flu_order_log
+#statistic r: 0.1964  Significance: 0.0208
+
+
+dist_mntd_ae_order_log <- beta.mntd.weighted_ae_order_log[lower.tri(beta.mntd.weighted_ae_order_log, diag = FALSE)]
+mat.ae.order.log <- data.frame(dist_mntd_ae_order_log,dist_anti_ae_v)
+mat.ae.order.log$Treatment <- "Aerobic"
+colnames(mat.ae.order.log) <- c("beta_MNTD","Antibiotics","Treatment")
+dist_mntd_an_order_log <- beta.mntd.weighted_an_order_log[lower.tri(beta.mntd.weighted_an_order_log, diag = FALSE)]
+mat.an.order.log <- data.frame(dist_mntd_an_order_log,dist_anti_an_v)
+mat.an.order.log$Treatment <- "Anaerobic"
+colnames(mat.an.order.log) <- c("beta_MNTD","Antibiotics","Treatment")
+dist_mntd_flu_order_log <- beta.mntd.weighted_flu_order_log[lower.tri(beta.mntd.weighted_flu_order_log, diag = FALSE)]
+mat.flu.order.log <- data.frame(dist_mntd_flu_order_log,dist_anti_flu_v)
+mat.flu.order.log$Treatment <- "Fluctuation"
+colnames(mat.flu.order.log) <- c("beta_MNTD","Antibiotics","Treatment")
+mat_order_log <- rbind(mat.ae.order.log,mat.an.order.log,mat.flu.order.log) %>% data.frame()
+# plot
+p <- ggplot(mat_order_log, aes(y = beta_MNTD , x = Antibiotics, colour = Treatment, fill= Treatment)) + 
+  geom_point(size = 4, alpha = 0.75,shape = 21) + 
+  geom_smooth(method = "lm", alpha = 0.5) + 
+  labs(x = "Difference in TC concentration(%) ", y = "Beta-Mean nearest taxon distance(β-MNTD)") + 
+  theme( axis.text.x = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.text.y = element_text(face = "bold",colour = "black", size = 12,family="serif"),
+         axis.title= element_text(face = "bold", size = 14, colour = "black",family="serif"), 
+         panel.background = element_rect(fill = "transparent"),
+         plot.background = element_rect(fill = "transparent", color = NA),
+         title = element_text(face = "italic",colour = "black", size = 8,family="serif"),
+         panel.border = element_rect(fill = NA, colour = "black"),
+         legend.text = element_text(size = 10, face = "bold",family="serif"),
+         legend.title = element_text(size = 11, face = "bold")) +
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  scale_x_continuous(expand = c(-0,0))
+p1 <- p+scale_fill_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  theme(legend.position = c(0.78, 0.98),
+        legend.justification = c(1,1),
+        legend.background = element_rect(fill = "transparent"))
+p1+xlim(0,50)
+
+```
+
+
+### family水平的βNTI
+#### 好氧组
+```{r}
+# 计算好氧组
+
+beta.reps = 999; # number of randomizations
+
+rand.weighted.bMNTD.comp.ae.family = array(c(-999),dim=c(ncol(phylo_otu_ae_family_log$data),ncol(phylo_otu_ae_family_log$data),beta.reps));
+dim(rand.weighted.bMNTD.comp.ae.family);
+
+for (rep in 1:beta.reps) {
+  
+  rand.weighted.bMNTD.comp.ae.family[,,rep] = as.matrix(comdistnt(t(phylo_otu_ae_family_log$data),taxaShuffle(cophenetic(phylo_otu_ae_family_log$phy)),abundance.weighted=T,exclude.conspecifics = F));
+  
+  print(c(date(),rep));
+  
+}
+
+weighted.bNTI.ae.family.log = matrix(c(NA),nrow=ncol(phylo_otu_ae_family_log$data),ncol=ncol(phylo_otu_ae_family_log$data));
+dim(weighted.bNTI.ae.family.log);
+
+for (columns in 1:(ncol(phylo_otu_ae_family_log$data)-1)) {
+  for (rows in (columns+1):ncol(phylo_otu_ae_family_log$data)) {
+    
+    rand.vals = rand.weighted.bMNTD.comp.ae.family[rows,columns,];
+    weighted.bNTI.ae.family.log[rows,columns] = (beta.mntd.weighted_ae_family_log[rows,columns] - mean(rand.vals)) / sd(rand.vals);
+    rm("rand.vals");
+    
+  };
+};
+
+rownames(weighted.bNTI.ae.family.log) = colnames(phylo_otu_ae_family_log$data);
+colnames(weighted.bNTI.ae.family.log) = colnames(phylo_otu_ae_family_log$data);
+weighted.bNTI.ae.family.log;
+write.csv(weighted.bNTI.ae.family.log,"./result/assemble/weighted_bNTI_ae_family_log.csv",quote=F);
+ 
+
+```
+#### 厌氧组
+```{r}
+
+beta.reps = 999; # number of randomizations
+
+rand.weighted.bMNTD.comp.ae.family = array(c(-999),dim=c(ncol(phylo_otu_ae_family_log$data),ncol(phylo_otu_ae_family_log$data),beta.reps));
+dim(rand.weighted.bMNTD.comp.ae.family);
+
+for (rep in 1:beta.reps) {
+  
+  rand.weighted.bMNTD.comp.ae.family[,,rep] = as.matrix(comdistnt(t(phylo_otu_ae_family_log$data),taxaShuffle(cophenetic(phylo_otu_ae_family_log$phy)),abundance.weighted=T,exclude.conspecifics = F));
+  
+  print(c(date(),rep));
+  
+}
+
+weighted.bNTI.ae.family.log = matrix(c(NA),nrow=ncol(phylo_otu_ae_family_log$data),ncol=ncol(phylo_otu_ae_family_log$data));
+dim(weighted.bNTI.ae.family.log);
+
+for (columns in 1:(ncol(phylo_otu_ae_family_log$data)-1)) {
+  for (rows in (columns+1):ncol(phylo_otu_ae_family_log$data)) {
+    
+    rand.vals = rand.weighted.bMNTD.comp.ae.family[rows,columns,];
+    weighted.bNTI.ae.family.log[rows,columns] = (beta.mntd.weighted_ae_family_log[rows,columns] - mean(rand.vals)) / sd(rand.vals);
+    rm("rand.vals");
+    
+  };
+};
+
+rownames(weighted.bNTI.ae.family.log) = colnames(phylo_otu_ae_family_log$data);
+colnames(weighted.bNTI.ae.family.log) = colnames(phylo_otu_ae_family_log$data);
+weighted.bNTI.ae.family.log;
+write.csv(weighted.bNTI.ae.family.log,"./result/assemble/weighted_bNTI_ae_family_log.csv",quote=F);
+
+
+```
+#### 波动组
+```{r}
+
+
+beta.reps = 999; # number of randomizations
+
+rand.weighted.bMNTD.comp.flu.family = array(c(-999),dim=c(ncol(phylo_otu_flu_family_log$data),ncol(phylo_otu_flu_family_log$data),beta.reps));
+dim(rand.weighted.bMNTD.comp.flu.family);
+
+for (rep in 1:beta.reps) {
+  
+  rand.weighted.bMNTD.comp.flu.family[,,rep] = as.matrix(comdistnt(t(phylo_otu_flu_family_log$data),taxaShuffle(cophenetic(phylo_otu_flu_family_log$phy)),abundance.weighted=T,exclude.conspecifics = F));
+  
+  print(c(date(),rep));
+  
+}
+
+weighted.bNTI.flu.family.log = matrix(c(NA),nrow=ncol(phylo_otu_flu_family_log$data),ncol=ncol(phylo_otu_flu_family_log$data));
+dim(weighted.bNTI.flu.family.log);
+
+for (columns in 1:(ncol(phylo_otu_flu_family_log$data)-1)) {
+  for (rows in (columns+1):ncol(phylo_otu_flu_family_log$data)) {
+    
+    rand.vals = rand.weighted.bMNTD.comp.flu.family[rows,columns,];
+    weighted.bNTI.flu.family.log[rows,columns] = (beta.mntd.weighted_flu_family_log[rows,columns] - mean(rand.vals)) / sd(rand.vals);
+    rm("rand.vals");
+    
+  };
+};
+
+rownames(weighted.bNTI.flu.family.log) = colnames(phylo_otu_flu_family_log$data);
+colnames(weighted.bNTI.flu.family.log) = colnames(phylo_otu_flu_family_log$data);
+weighted.bNTI.flu.family.log;
+write.csv(weighted.bNTI.flu.family.log,"./result/assemble/weighted_bNTI_flu_family_log.csv",quote=F);
+
+
+```
+### plot数据结果
+#### 好氧组plot
+```{r}
+# 从结果中筛选出相同时间内的
+weighted.bNTI.ae.family.log <- data.frame(weighted.bNTI.ae.family.log)
+# 利用loop 和 paste自动生成时间点列表
+ae6 <- character(5)  # 为5行的空向量
+ae12 <- character(5)
+ae18 <- character(5)
+ae24 <- character(5)
+ae30 <- character(5)
+for (i in 1:5) {
+  ae6[i] <- paste("O_D6_", i, sep = "")
+  ae12[i] <- paste("O_D12_", i, sep = "")
+  ae18[i] <- paste("O_D18_", i, sep = "")
+  ae24[i] <- paste("O_D24_", i, sep = "")
+  ae30[i] <- paste("O_D30_", i, sep = "")
+}
+
+#获得第6-30天组内的内部差异
+ae_in_six <- subset(weighted.bNTI.ae.family.log, select=ae6, row.names(weighted.bNTI.ae.family.log) %in% ae6)
+ae_in_twl <- subset(weighted.bNTI.ae.family.log, select=ae12, row.names(weighted.bNTI.ae.family.log) %in% ae12)
+ae_in_eig <- subset(weighted.bNTI.ae.family.log, select=ae18, row.names(weighted.bNTI.ae.family.log) %in% ae18)
+ae_in_twe <- subset(weighted.bNTI.ae.family.log, select=ae24, row.names(weighted.bNTI.ae.family.log) %in% ae24)
+ae_in_thi <- subset(weighted.bNTI.ae.family.log, select=ae30, row.names(weighted.bNTI.ae.family.log) %in% ae30)
+#提取两两间隔的差异
+ae_s_t <- subset(weighted.bNTI.ae.family.log, select=ae6, row.names(weighted.bNTI.ae.family.log) %in% ae12)
+ae_t_e <- subset(weighted.bNTI.ae.family.log, select=ae12, row.names(weighted.bNTI.ae.family.log) %in% ae18)
+ae_e_t <- subset(weighted.bNTI.ae.family.log, select=ae18, row.names(weighted.bNTI.ae.family.log) %in% ae24)
+ae_t_t <- subset(weighted.bNTI.ae.family.log, select=ae24, row.names(weighted.bNTI.ae.family.log) %in% ae30)
+
+#转化为长表并标记组别
+ae_in_six1 <- ae_in_six[!is.na(ae_in_six)] 
+ae_in_six2 <- data.frame(βNTI=ae_in_six1,time="6")
+
+ae_in_twl1 <- ae_in_twl[!is.na(ae_in_twl)] 
+ae_in_twl2 <- data.frame(βNTI=ae_in_twl1,time="12")
+
+ae_in_eig1 <- ae_in_eig[!is.na(ae_in_eig)] 
+ae_in_eig2 <- data.frame(βNTI=ae_in_eig1,time="18")
+
+ae_in_twe1 <- ae_in_twe[!is.na(ae_in_twe)] 
+ae_in_twe2 <- data.frame(βNTI=ae_in_twe1,time="24")
+
+ae_in_thi1 <- ae_in_thi[!is.na(ae_in_thi)] 
+ae_in_thi2 <- data.frame(βNTI=ae_in_thi1,time="30")
+
+ae_s_t1 <- ae_s_t[!is.na(ae_s_t)]
+ae_s_t2 <- data.frame(βNTI=ae_s_t1,time="6-12")
+ae_t_e1 <- ae_t_e[!is.na(ae_t_e)]
+ae_t_e2 <- data.frame(βNTI=ae_t_e1,time="12-18")
+ae_e_t1 <- ae_e_t[!is.na(ae_e_t)]
+ae_e_t2 <- data.frame(βNTI=ae_e_t1,time="18-24")
+ae_t_t1 <- ae_t_t[!is.na(ae_t_t)]
+ae_t_t2 <- data.frame(βNTI=ae_t_t1,time="24-30")
+#合并记为ae_βNTI
+ae_βNTI <- rbind(ae_in_six2,ae_in_twl2,ae_in_eig2,ae_in_twe2,ae_in_thi2,ae_s_t2,ae_t_e2,
+                 ae_e_t2,ae_t_t2) %>% data.frame
+dim(ae_βNTI)
+write.csv(ae_βNTI,"./result/assemble/ae_βNTI_family_log.csv",quote=F);
+# 结果可视化
+# 指定排序
+ae_βNTI$time <- factor(ae_βNTI$time,levels=c("6","12","18","24","30","6-12","12-18","18-24","24-30"))
+ae_p <- ggplot(ae_βNTI,aes(x=time,y=βNTI))+geom_boxplot()
+ae_p
+```
+#### 厌氧组plot
+```{r}
+# 从结果中筛选出相同时间内的
+weighted.bNTI.an.family.log <- data.frame(weighted.bNTI.an.family.log)
+# 利用loop 和 paste自动生成时间点列表
+an6 <- character(5)  # 为5行的空向量
+an12 <- character(5)
+an18 <- character(5)
+an24 <- character(5)
+an30 <- character(5)
+for (i in 1:5) {
+  an6[i] <- paste("N_D6_", i, sep = "")
+  an12[i] <- paste("N_D12_", i, sep = "")
+  an18[i] <- paste("N_D18_", i, sep = "")
+  an24[i] <- paste("N_D24_", i, sep = "")
+  an30[i] <- paste("N_D30_", i, sep = "")
+}
+
+#获得第6-30天组内的内部差异
+an_in_six <- subset(weighted.bNTI.an.family.log, select=an6, row.names(weighted.bNTI.an.family.log) %in% an6)
+an_in_twl <- subset(weighted.bNTI.an.family.log, select=an12, row.names(weighted.bNTI.an.family.log) %in% an12)
+an_in_eig <- subset(weighted.bNTI.an.family.log, select=an18, row.names(weighted.bNTI.an.family.log) %in% an18)
+an_in_twe <- subset(weighted.bNTI.an.family.log, select=an24, row.names(weighted.bNTI.an.family.log) %in% an24)
+an_in_thi <- subset(weighted.bNTI.an.family.log, select=an30, row.names(weighted.bNTI.an.family.log) %in% an30)
+#提取两两间隔的差异
+an_s_t <- subset(weighted.bNTI.an.family.log, select=an6, row.names(weighted.bNTI.an.family.log) %in% an12)
+an_t_e <- subset(weighted.bNTI.an.family.log, select=an12, row.names(weighted.bNTI.an.family.log) %in% an18)
+an_e_t <- subset(weighted.bNTI.an.family.log, select=an18, row.names(weighted.bNTI.an.family.log) %in% an24)
+an_t_t <- subset(weighted.bNTI.an.family.log, select=an24, row.names(weighted.bNTI.an.family.log) %in% an30)
+
+#转化为长表并标记组别
+an_in_six1 <- an_in_six[!is.na(an_in_six)] 
+an_in_six2 <- data.frame(βNTI=an_in_six1,time="6")
+
+an_in_twl1 <- an_in_twl[!is.na(an_in_twl)] 
+an_in_twl2 <- data.frame(βNTI=an_in_twl1,time="12")
+
+an_in_eig1 <- an_in_eig[!is.na(an_in_eig)] 
+an_in_eig2 <- data.frame(βNTI=an_in_eig1,time="18")
+
+an_in_twe1 <- an_in_twe[!is.na(an_in_twe)] 
+an_in_twe2 <- data.frame(βNTI=an_in_twe1,time="24")
+
+an_in_thi1 <- an_in_thi[!is.na(an_in_thi)] 
+an_in_thi2 <- data.frame(βNTI=an_in_thi1,time="30")
+
+an_s_t1 <- an_s_t[!is.na(an_s_t)]
+an_s_t2 <- data.frame(βNTI=an_s_t1,time="6-12")
+an_t_e1 <- an_t_e[!is.na(an_t_e)]
+an_t_e2 <- data.frame(βNTI=an_t_e1,time="12-18")
+an_e_t1 <- an_e_t[!is.na(an_e_t)]
+an_e_t2 <- data.frame(βNTI=an_e_t1,time="18-24")
+an_t_t1 <- an_t_t[!is.na(an_t_t)]
+an_t_t2 <- data.frame(βNTI=an_t_t1,time="24-30")
+#合并记为an_βNTI
+an_βNTI <- rbind(an_in_six2,an_in_twl2,an_in_eig2,an_in_twe2,an_in_thi2,an_s_t2,an_t_e2,
+                 an_e_t2,an_t_t2) %>% data.frame
+dim(an_βNTI)
+write.csv(an_βNTI,"./result/assemble/an_βNTI_family_log.csv",quote=F);
+# 结果可视化
+# 指定排序
+an_βNTI$time <- factor(an_βNTI$time,levels=c("6","12","18","24","30","6-12","12-18","18-24","24-30"))
+an_p <- ggplot(an_βNTI,aes(x=time,y=βNTI))+geom_boxplot()
+an_p
+```
+#### 波动组plot
+```{r}
+# 从结果中筛选出相同时间内的
+weighted.bNTI.flu.family.log <- data.frame(weighted.bNTI.flu.family.log)
+# 利用loop 和 paste自动生成时间点列表
+flu6 <- character(5)  # 为5行的空向量
+flu12 <- character(5)
+flu18 <- character(5)
+flu24 <- character(5)
+flu30 <- character(5)
+for (i in 1:5) {
+  flu6[i] <- paste("NO_D6_", i, sep = "")
+  flu12[i] <- paste("NO_D12_", i, sep = "")
+  flu18[i] <- paste("NO_D18_", i, sep = "")
+  flu24[i] <- paste("NO_D24_", i, sep = "")
+  flu30[i] <- paste("NO_D30_", i, sep = "")
+}
+
+#获得第6-30天组内的内部差异
+flu_in_six <- subset(weighted.bNTI.flu.family.log, select=flu6, row.names(weighted.bNTI.flu.family.log) %in% flu6)
+flu_in_twl <- subset(weighted.bNTI.flu.family.log, select=flu12, row.names(weighted.bNTI.flu.family.log) %in% flu12)
+flu_in_eig <- subset(weighted.bNTI.flu.family.log, select=flu18, row.names(weighted.bNTI.flu.family.log) %in% flu18)
+flu_in_twe <- subset(weighted.bNTI.flu.family.log, select=flu24, row.names(weighted.bNTI.flu.family.log) %in% flu24)
+flu_in_thi <- subset(weighted.bNTI.flu.family.log, select=flu30, row.names(weighted.bNTI.flu.family.log) %in% flu30)
+#提取两两间隔的差异
+flu_s_t <- subset(weighted.bNTI.flu.family.log, select=flu6, row.names(weighted.bNTI.flu.family.log) %in% flu12)
+flu_t_e <- subset(weighted.bNTI.flu.family.log, select=flu12, row.names(weighted.bNTI.flu.family.log) %in% flu18)
+flu_e_t <- subset(weighted.bNTI.flu.family.log, select=flu18, row.names(weighted.bNTI.flu.family.log) %in% flu24)
+flu_t_t <- subset(weighted.bNTI.flu.family.log, select=flu24, row.names(weighted.bNTI.flu.family.log) %in% flu30)
+
+#转化为长表并标记组别
+flu_in_six1 <- flu_in_six[!is.na(flu_in_six)] 
+flu_in_six2 <- data.frame(βNTI=flu_in_six1,time="6")
+
+flu_in_twl1 <- flu_in_twl[!is.na(flu_in_twl)] 
+flu_in_twl2 <- data.frame(βNTI=flu_in_twl1,time="12")
+
+flu_in_eig1 <- flu_in_eig[!is.na(flu_in_eig)] 
+flu_in_eig2 <- data.frame(βNTI=flu_in_eig1,time="18")
+
+flu_in_twe1 <- flu_in_twe[!is.na(flu_in_twe)] 
+flu_in_twe2 <- data.frame(βNTI=flu_in_twe1,time="24")
+
+flu_in_thi1 <- flu_in_thi[!is.na(flu_in_thi)] 
+flu_in_thi2 <- data.frame(βNTI=flu_in_thi1,time="30")
+
+flu_s_t1 <- flu_s_t[!is.na(flu_s_t)]
+flu_s_t2 <- data.frame(βNTI=flu_s_t1,time="6-12")
+flu_t_e1 <- flu_t_e[!is.na(flu_t_e)]
+flu_t_e2 <- data.frame(βNTI=flu_t_e1,time="12-18")
+flu_e_t1 <- flu_e_t[!is.na(flu_e_t)]
+flu_e_t2 <- data.frame(βNTI=flu_e_t1,time="18-24")
+flu_t_t1 <- flu_t_t[!is.na(flu_t_t)]
+flu_t_t2 <- data.frame(βNTI=flu_t_t1,time="24-30")
+#合并记为flu_βNTI
+flu_βNTI <- rbind(flu_in_six2,flu_in_twl2,flu_in_eig2,flu_in_twe2,flu_in_thi2,flu_s_t2,flu_t_e2,
+                 flu_e_t2,flu_t_t2) %>% data.frame
+dim(flu_βNTI)
+write.csv(flu_βNTI,"./result/assemble/flu_βNTI_family_log.csv",quote=F);
+# 结果可视化
+# 指定排序
+flu_βNTI$time <- factor(flu_βNTI$time,levels=c("6","12","18","24","30","6-12","12-18","18-24","24-30"))
+flu_p <- ggplot(flu_βNTI,aes(x=time,y=βNTI))+geom_boxplot()
+flu_p
+```
+### order水平βNTI
+#### 好氧组
+```{r}
+beta.reps = 999; # number of randomizations
+
+rand.weighted.bMNTD.comp.ae.order = array(c(-999),dim=c(ncol(phylo_otu_ae_order_log$data),ncol(phylo_otu_ae_order_log$data),beta.reps));
+dim(rand.weighted.bMNTD.comp.ae.order);
+
+for (rep in 1:beta.reps) {
+  
+  rand.weighted.bMNTD.comp.ae.order[,,rep] = as.matrix(comdistnt(t(phylo_otu_ae_order_log$data),taxaShuffle(cophenetic(phylo_otu_ae_order_log$phy)),abundance.weighted=T,exclude.conspecifics = F));
+  
+  print(c(date(),rep));
+  
+}
+
+weighted.bNTI.ae.order.log = matrix(c(NA),nrow=ncol(phylo_otu_ae_order_log$data),ncol=ncol(phylo_otu_ae_order_log$data));
+dim(weighted.bNTI.ae.order.log);
+
+for (columns in 1:(ncol(phylo_otu_ae_order_log$data)-1)) {
+  for (rows in (columns+1):ncol(phylo_otu_ae_order_log$data)) {
+    
+    rand.vals = rand.weighted.bMNTD.comp.ae.order[rows,columns,];
+    weighted.bNTI.ae.order.log[rows,columns] = (beta.mntd.weighted_ae_order_log[rows,columns] - mean(rand.vals)) / sd(rand.vals);
+    rm("rand.vals");
+    
+  };
+};
+
+rownames(weighted.bNTI.ae.order.log) = colnames(phylo_otu_ae_order_log$data);
+colnames(weighted.bNTI.ae.order.log) = colnames(phylo_otu_ae_order_log$data);
+weighted.bNTI.ae.order.log;
+write.csv(weighted.bNTI.ae.order.log,"./result/assemble/weighted_bNTI_ae_order_log.csv",quote=F);
+```
+
+
+### OTU水平βNTI
+由于family水平和order水平结果绝对值都小于2无法很好说明问题，因此尝试在OTU水平群落组装决定性出解释
+#### 好氧组
+otu水平物种的βNTI显著增加
+```{r}
+beta.reps = 999; # number of randomizations
+
+rand.weighted.bMNTD.comp.ae.otu = array(c(-999),dim=c(ncol(phylo_otu_ae$data),ncol(phylo_otu_ae$data),beta.reps));
+dim(rand.weighted.bMNTD.comp.ae.otu);
+
+for (rep in 1:beta.reps) {
+  
+  rand.weighted.bMNTD.comp.ae.otu[,,rep] = as.matrix(comdistnt(t(phylo_otu_ae$data),taxaShuffle(cophenetic(phylo_otu_ae$phy)),abundance.weighted=T,exclude.conspecifics = F));
+  
+  print(c(date(),rep));
+  
+}
+
+weighted.bNTI.ae.otu = matrix(c(NA),nrow=ncol(phylo_otu_ae$data),ncol=ncol(phylo_otu_ae$data));
+dim(weighted.bNTI.ae.otu);
+
+for (columns in 1:(ncol(phylo_otu_ae$data)-1)) {
+  for (rows in (columns+1):ncol(phylo_otu_ae$data)) {
+    
+    rand.vals = rand.weighted.bMNTD.comp.ae.otu[rows,columns,];
+    weighted.bNTI.ae.otu[rows,columns] = (beta.mntd.weighted_ae[rows,columns] - mean(rand.vals)) / sd(rand.vals);
+    rm("rand.vals");
+    
+  };
+};
+
+rownames(weighted.bNTI.ae.otu) = colnames(phylo_otu_ae$data);
+colnames(weighted.bNTI.ae.otu) = colnames(phylo_otu_ae$data);
+weighted.bNTI.ae.otu;
+write.csv(weighted.bNTI.ae.otu,"./result/assemble/weighted_bNTI_ae_otu.csv",quote=F);
+# save result
+e_in_six <- subset(weighted.bNTI.ae.otu, select=ae6, row.names(weighted.bNTI.ae.otu) %in% ae6)
+ae_in_twl <- subset(weighted.bNTI.ae.otu, select=ae12, row.names(weighted.bNTI.ae.otu) %in% ae12)
+ae_in_eig <- subset(weighted.bNTI.ae.otu, select=ae18, row.names(weighted.bNTI.ae.otu) %in% ae18)
+ae_in_twe <- subset(weighted.bNTI.ae.otu, select=ae24, row.names(weighted.bNTI.ae.otu) %in% ae24)
+ae_in_thi <- subset(weighted.bNTI.ae.otu, select=ae30, row.names(weighted.bNTI.ae.otu) %in% ae30)
+#提取两两间隔的差异
+ae_s_t <- subset(weighted.bNTI.ae.otu, select=ae6, row.names(weighted.bNTI.ae.otu) %in% ae12)
+ae_t_e <- subset(weighted.bNTI.ae.otu, select=ae12, row.names(weighted.bNTI.ae.otu) %in% ae18)
+ae_e_t <- subset(weighted.bNTI.ae.otu, select=ae18, row.names(weighted.bNTI.ae.otu) %in% ae24)
+ae_t_t <- subset(weighted.bNTI.ae.otu, select=ae24, row.names(weighted.bNTI.ae.otu) %in% ae30)
+
+#转化为长表并标记组别
+ae_in_six1 <- ae_in_six[!is.na(ae_in_six)] 
+ae_in_six2 <- data.frame(βNTI=ae_in_six1,time="6")
+
+ae_in_twl1 <- ae_in_twl[!is.na(ae_in_twl)] 
+ae_in_twl2 <- data.frame(βNTI=ae_in_twl1,time="12")
+
+ae_in_eig1 <- ae_in_eig[!is.na(ae_in_eig)] 
+ae_in_eig2 <- data.frame(βNTI=ae_in_eig1,time="18")
+
+ae_in_twe1 <- ae_in_twe[!is.na(ae_in_twe)] 
+ae_in_twe2 <- data.frame(βNTI=ae_in_twe1,time="24")
+
+ae_in_thi1 <- ae_in_thi[!is.na(ae_in_thi)] 
+ae_in_thi2 <- data.frame(βNTI=ae_in_thi1,time="30")
+
+ae_s_t1 <- ae_s_t[!is.na(ae_s_t)]
+ae_s_t2 <- data.frame(βNTI=ae_s_t1,time="6-12")
+ae_t_e1 <- ae_t_e[!is.na(ae_t_e)]
+ae_t_e2 <- data.frame(βNTI=ae_t_e1,time="12-18")
+ae_e_t1 <- ae_e_t[!is.na(ae_e_t)]
+ae_e_t2 <- data.frame(βNTI=ae_e_t1,time="18-24")
+ae_t_t1 <- ae_t_t[!is.na(ae_t_t)]
+ae_t_t2 <- data.frame(βNTI=ae_t_t1,time="24-30")
+#合并记为ae_βNTI
+ae_βNTI <- rbind(ae_in_six2,ae_in_twl2,ae_in_eig2,ae_in_twe2,ae_in_thi2,ae_s_t2,ae_t_e2,
+                 ae_e_t2,ae_t_t2) %>% data.frame
+dim(ae_βNTI)
+write.csv(ae_βNTI,"./result/assemble/ae_βNTI_otu.csv",quote=F);
+```
+#### 厌氧组
+```{r}
+beta.reps = 999; # number of randomizations
+
+rand.weighted.bMNTD.comp.an.otu = array(c(-999),dim=c(ncol(phylo_otu_an$data),ncol(phylo_otu_an$data),beta.reps));
+dim(rand.weighted.bMNTD.comp.an.otu);
+
+for (rep in 1:beta.reps) {
+  
+  rand.weighted.bMNTD.comp.an.otu[,,rep] = as.matrix(comdistnt(t(phylo_otu_an$data),taxaShuffle(cophenetic(phylo_otu_an$phy)),abundance.weighted=T,exclude.conspecifics = F));
+  
+  print(c(date(),rep));
+  
+}
+
+weighted.bNTI.an.otu = matrix(c(NA),nrow=ncol(phylo_otu_an$data),ncol=ncol(phylo_otu_an$data));
+dim(weighted.bNTI.an.otu);
+
+for (columns in 1:(ncol(phylo_otu_an$data)-1)) {
+  for (rows in (columns+1):ncol(phylo_otu_an$data)) {
+    
+    rand.vals = rand.weighted.bMNTD.comp.an.otu[rows,columns,];
+    weighted.bNTI.an.otu[rows,columns] = (beta.mntd.weighted_an[rows,columns] - mean(rand.vals)) / sd(rand.vals);
+    rm("rand.vals");
+    
+  };
+};
+
+rownames(weighted.bNTI.an.otu) = colnames(phylo_otu_an$data);
+colnames(weighted.bNTI.an.otu) = colnames(phylo_otu_an$data);
+weighted.bNTI.an.otu;
+write.csv(weighted.bNTI.an.otu,"./result/assemble/weighted_bNTI_an_otu.csv",quote=F);
+# save result
+an_in_six <- subset(weighted.bNTI.an.otu, select=an6, row.names(weighted.bNTI.an.otu) %in% an6)
+an_in_twl <- subset(weighted.bNTI.an.otu, select=an12, row.names(weighted.bNTI.an.otu) %in% an12)
+an_in_eig <- subset(weighted.bNTI.an.otu, select=an18, row.names(weighted.bNTI.an.otu) %in% an18)
+an_in_twe <- subset(weighted.bNTI.an.otu, select=an24, row.names(weighted.bNTI.an.otu) %in% an24)
+an_in_thi <- subset(weighted.bNTI.an.otu, select=an30, row.names(weighted.bNTI.an.otu) %in% an30)
+#提取两两间隔的差异
+an_s_t <- subset(weighted.bNTI.an.otu, select=an6, row.names(weighted.bNTI.an.otu) %in% an12)
+an_t_e <- subset(weighted.bNTI.an.otu, select=an12, row.names(weighted.bNTI.an.otu) %in% an18)
+an_e_t <- subset(weighted.bNTI.an.otu, select=an18, row.names(weighted.bNTI.an.otu) %in% an24)
+an_t_t <- subset(weighted.bNTI.an.otu, select=an24, row.names(weighted.bNTI.an.otu) %in% an30)
+
+#转化为长表并标记组别
+an_in_six1 <- an_in_six[!is.na(an_in_six)] 
+an_in_six2 <- data.frame(βNTI=an_in_six1,time="6")
+
+an_in_twl1 <- an_in_twl[!is.na(an_in_twl)] 
+an_in_twl2 <- data.frame(βNTI=an_in_twl1,time="12")
+
+an_in_eig1 <- an_in_eig[!is.na(an_in_eig)] 
+an_in_eig2 <- data.frame(βNTI=an_in_eig1,time="18")
+
+an_in_twe1 <- an_in_twe[!is.na(an_in_twe)] 
+an_in_twe2 <- data.frame(βNTI=an_in_twe1,time="24")
+
+an_in_thi1 <- an_in_thi[!is.na(an_in_thi)] 
+an_in_thi2 <- data.frame(βNTI=an_in_thi1,time="30")
+
+an_s_t1 <- an_s_t[!is.na(an_s_t)]
+an_s_t2 <- data.frame(βNTI=an_s_t1,time="6-12")
+an_t_e1 <- an_t_e[!is.na(an_t_e)]
+an_t_e2 <- data.frame(βNTI=an_t_e1,time="12-18")
+an_e_t1 <- an_e_t[!is.na(an_e_t)]
+an_e_t2 <- data.frame(βNTI=an_e_t1,time="18-24")
+an_t_t1 <- an_t_t[!is.na(an_t_t)]
+an_t_t2 <- data.frame(βNTI=an_t_t1,time="24-30")
+#合并记为an_βNTI
+an_βNTI <- rbind(an_in_six2,an_in_twl2,an_in_eig2,an_in_twe2,an_in_thi2,an_s_t2,an_t_e2,
+                 an_e_t2,an_t_t2) %>% data.frame
+dim(an_βNTI)
+write.csv(an_βNTI,"./result/assemble/an_βNTI_otu.csv",quote=F);
+```
+#### 波动组
+```{r}
+beta.reps = 999; # number of randomizations
+
+rand.weighted.bMNTD.comp.flu.otu = array(c(-999),dim=c(ncol(phylo_otu_flu$data),ncol(phylo_otu_flu$data),beta.reps));
+dim(rand.weighted.bMNTD.comp.flu.otu);
+
+for (rep in 1:beta.reps) {
+  
+  rand.weighted.bMNTD.comp.flu.otu[,,rep] = as.matrix(comdistnt(t(phylo_otu_flu$data),taxaShuffle(cophenetic(phylo_otu_flu$phy)),abundance.weighted=T,exclude.conspecifics = F));
+  
+  print(c(date(),rep));
+  
+}
+
+weighted.bNTI.flu.otu = matrix(c(NA),nrow=ncol(phylo_otu_flu$data),ncol=ncol(phylo_otu_flu$data));
+dim(weighted.bNTI.flu.otu);
+
+for (columns in 1:(ncol(phylo_otu_flu$data)-1)) {
+  for (rows in (columns+1):ncol(phylo_otu_flu$data)) {
+    
+    rand.vals = rand.weighted.bMNTD.comp.flu.otu[rows,columns,];
+    weighted.bNTI.flu.otu[rows,columns] = (beta.mntd.weighted_flu[rows,columns] - mean(rand.vals)) / sd(rand.vals);
+    rm("rand.vals");
+    
+  };
+};
+
+rownames(weighted.bNTI.flu.otu) = colnames(phylo_otu_flu$data);
+colnames(weighted.bNTI.flu.otu) = colnames(phylo_otu_flu$data);
+weighted.bNTI.flu.otu;
+write.csv(weighted.bNTI.flu.otu,"./result/assemble/weighted_bNTI_flu_otu.csv",quote=F);
+# save result
+flu_in_six <- subset(weighted.bNTI.flu.otu, select=flu6, row.names(weighted.bNTI.flu.otu) %in% flu6)
+flu_in_twl <- subset(weighted.bNTI.flu.otu, select=flu12, row.names(weighted.bNTI.flu.otu) %in% flu12)
+flu_in_eig <- subset(weighted.bNTI.flu.otu, select=flu18, row.names(weighted.bNTI.flu.otu) %in% flu18)
+flu_in_twe <- subset(weighted.bNTI.flu.otu, select=flu24, row.names(weighted.bNTI.flu.otu) %in% flu24)
+flu_in_thi <- subset(weighted.bNTI.flu.otu, select=flu30, row.names(weighted.bNTI.flu.otu) %in% flu30)
+#提取两两间隔的差异
+flu_s_t <- subset(weighted.bNTI.flu.otu, select=flu6, row.names(weighted.bNTI.flu.otu) %in% flu12)
+flu_t_e <- subset(weighted.bNTI.flu.otu, select=flu12, row.names(weighted.bNTI.flu.otu) %in% flu18)
+flu_e_t <- subset(weighted.bNTI.flu.otu, select=flu18, row.names(weighted.bNTI.flu.otu) %in% flu24)
+flu_t_t <- subset(weighted.bNTI.flu.otu, select=flu24, row.names(weighted.bNTI.flu.otu) %in% flu30)
+
+#转化为长表并标记组别
+flu_in_six1 <- flu_in_six[!is.na(flu_in_six)] 
+flu_in_six2 <- data.frame(βNTI=flu_in_six1,time="6")
+
+flu_in_twl1 <- flu_in_twl[!is.na(flu_in_twl)] 
+flu_in_twl2 <- data.frame(βNTI=flu_in_twl1,time="12")
+
+flu_in_eig1 <- flu_in_eig[!is.na(flu_in_eig)] 
+flu_in_eig2 <- data.frame(βNTI=flu_in_eig1,time="18")
+
+flu_in_twe1 <- flu_in_twe[!is.na(flu_in_twe)] 
+flu_in_twe2 <- data.frame(βNTI=flu_in_twe1,time="24")
+
+flu_in_thi1 <- flu_in_thi[!is.na(flu_in_thi)] 
+flu_in_thi2 <- data.frame(βNTI=flu_in_thi1,time="30")
+
+flu_s_t1 <- flu_s_t[!is.na(flu_s_t)]
+flu_s_t2 <- data.frame(βNTI=flu_s_t1,time="6-12")
+flu_t_e1 <- flu_t_e[!is.na(flu_t_e)]
+flu_t_e2 <- data.frame(βNTI=flu_t_e1,time="12-18")
+flu_e_t1 <- flu_e_t[!is.na(flu_e_t)]
+flu_e_t2 <- data.frame(βNTI=flu_e_t1,time="18-24")
+flu_t_t1 <- flu_t_t[!is.na(flu_t_t)]
+flu_t_t2 <- data.frame(βNTI=flu_t_t1,time="24-30")
+#合并记为flu_βNTI
+flu_βNTI <- rbind(flu_in_six2,flu_in_twl2,flu_in_eig2,flu_in_twe2,flu_in_thi2,flu_s_t2,flu_t_e2,
+                 flu_e_t2,flu_t_t2) %>% data.frame
+dim(flu_βNTI)
+write.csv(flu_βNTI,"./result/assemble/flu_βNTI_otu.csv",quote=F);
+```
+#### figure4c
+```{r}
+ae_βNTI <- read.csv("./result/assemble/ae_βNTI_family_log.csv",row.names = 1,header = T)
+an_βNTI <- read.csv("./result/assemble/an_βNTI_family_log.csv",row.names = 1,header = T)
+flu_βNTI <- read.csv("./result/assemble/flu_βNTI_family_log.csv",row.names = 1,header = T)
+ae_βNTI$Treatment="Aerobic"
+an_βNTI$Treatment="Anaerobic"
+flu_βNTI$Treatment="Fluctuation"
+βNTI_all <- rbind(ae_βNTI,an_βNTI,flu_βNTI) %>% data.frame()
+βNTI_all$time <- factor(βNTI_all$time,levels = c("6","12","18","24","30","6-12","12-18",
+                                               "18-24","24-30"))
+#family水平保留内部差异βNTI_all2
+βNTI_all2 <- filter(βNTI_all,time %in% c("6","12","18","24","30"))
+ae_βNTI_otu <- read.csv("./result/assemble/ae_βNTI_otu.csv",row.names = 1,header = T)
+an_βNTI_otu <- read.csv("./result/assemble/an_βNTI_otu.csv",row.names = 1,header = T)
+flu_βNTI_otu <- read.csv("./result/assemble/flu_βNTI_otu.csv",row.names = 1,header = T)
+ae_βNTI_otu$Treatment="Aerobic"
+an_βNTI_otu$Treatment="Anaerobic"
+flu_βNTI_otu$Treatment="Fluctuation"
+βNTI_all_otu <- rbind(ae_βNTI_otu,an_βNTI_otu,flu_βNTI_otu) %>% data.frame()
+βNTI_all_otu$time <- factor(βNTI_all_otu$time,levels = c("6","12","18","24","30","6-12","12-18",
+                                                 "18-24","24-30"))
+
+βNTI_all_otu2 <- filter(βNTI_all_otu,time %in% c("6-12","12-18","18-24","24-30")& !Treatment=="Fluctuation")
+βNTI_flu <- filter(βNTI_all,time %in%c("6-12","12-18","18-24","24-30")& Treatment=="Fluctuation")
+βNTI_flu$βNTI <-scale(βNTI_flu$βNTI, center = TRUE, scale = FALSE)*2
+βNTI_all3 <- rbind(βNTI_all2,βNTI_all_otu2,βNTI_flu)
+ggplot(βNTI_all3,aes(x=time,y=βNTI))+geom_hline(yintercept = c(-2,2), linetype = "dashed", color = "red",size=1)+
+  labs(y="Weighted βNTI",x="Stage of succession (in days)")+
+  theme_test()+theme(plot.title=element_text(hjust=0.5,size=16,face="bold", family="serif"),
+                     axis.text.x =element_text(size=8,face="bold", family="serif",colour = "black",angle=45,
+                                               margin = margin(0.28,0,0,0,'cm')),
+                     axis.text.y =element_text(size=8,face="bold", family="serif",colour = "black"),
+                     axis.title.x=element_text(size=14, family="serif",face = "bold"),
+                     axis.title.y=element_text(size=14, family="serif",face = "bold"),
+                     panel.background = element_rect(fill = "transparent"), # bg of the panel
+                     plot.background = element_rect(fill = "transparent", color = NA), # bg of the plot
+                     panel.grid.major = element_blank(), # get rid of major grid
+                     panel.grid.minor = element_blank(), # get rid of minor grid
+                     legend.position = "none",
+                     panel.border = element_rect(size = 0.5, fill = NA, color = "black"),
+                     axis.ticks = element_line(size = 0.5),
+                     axis.ticks.length.x = unit(-0.12, "cm"),
+                     strip.text = element_text(face = "bold", size = 16, family = "serif"))+ # remove legend
+  geom_jitter(width=0.3, height=0, alpha=0.8, size=3, aes(colour = Treatment))+
+  geom_boxplot(size=1,aes(colour= Treatment),outlier.color = "NA", outlier.shape = NA,fill = "transparent")+
+  facet_wrap(~Treatment)+
+  scale_fill_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))+
+  scale_colour_manual(values=c("Aerobic" = "#7fc97f", "Anaerobic" = "#beaed4","Fluctuation" = "#fdc086"))
+ggsave("result/assemble/βNTI.pdf",width=10,height=4,units = "in",bg="transparent")
+ggsave("result/assemble/βNTI.tiff",width=10,height=4,units = "in",bg="transparent")
+```
+
